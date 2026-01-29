@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Grid + Rectángulo arrastrable</title>
+  <style>
+    :root {
+      --cell: 24px;          /* tamaño de celda */
+      --grid-line: #2a2a2a;  /* líneas principales */
+      --grid-dot: #1f1f1f;   /* líneas secundarias */
+      --bg: #0f0f10;
+      --panel: #141416;
+      --rect: #2b6cff;
+      --rect-border: #86a8ff;
+      --text: #e9e9ea;
+      --muted: #b8b8bb;
+      --danger: #ff4d4d;
+    }
+
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 320px 1fr;
+    }
+
+    aside {
+      background: var(--panel);
+      border-right: 1px solid #1f1f1f;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+
+    h1 {
+      font-size: 16px;
+      margin: 0 0 12px 0;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid #232323;
+      background: #101012;
+      color: var(--text);
+      outline: none;
+    }
+
+    button {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid #2a2a2a;
+      background: #101012;
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { filter: brightness(1.08); }
+    .primary { background: #132042; border-color: #243b7a; }
+    .danger  { background: #2a1414; border-color: #5a2222; }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 10px;
+      line-height: 1.4;
+    }
+
+    main {
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* Superficie con cuadrícula */
+    #canvas {
+      position: absolute;
+      inset: 0;
+      background:
+        /* líneas finas */
+        linear-gradient(to right, var(--grid-dot) 1px, transparent 1px),
+        linear-gradient(to bottom, var(--grid-dot) 1px, transparent 1px),
+        /* líneas más marcadas cada 5 celdas */
+        linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+        linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+      background-size:
+        var(--cell) var(--cell),
+        var(--cell) var(--cell),
+        calc(var(--cell) * 5) calc(var(--cell) * 5),
+        calc(var(--cell) * 5) calc(var(--cell) * 5);
+      background-position: 0 0, 0 0, 0 0, 0 0;
+    }
+
+    /* Rectángulo */
+    .rect {
+      position: absolute;
+      border-radius: 12px;
+      background: color-mix(in srgb, var(--rect) 35%, transparent);
+      border: 2px solid var(--rect-border);
+      box-sizing: border-box;
+      user-select: none;
+      touch-action: none; /* para pointer events en móvil */
+      display: grid;
+      place-items: center;
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .rect.dragging {
+      outline: 2px dashed #ffffff55;
+      cursor: grabbing;
+    }
+
+    .rect .badge {
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: #00000055;
+      border: 1px solid #ffffff22;
+      backdrop-filter: blur(6px);
+    }
+
+    /* --- Resize handles --- */
+    .rect .handle{
+    position:absolute;
+    width:12px;
+    height:12px;
+    border-radius:4px;
+    background:#ffffffaa;
+    border:1px solid #00000055;
+    box-sizing:border-box;
+    touch-action:none;
+    }
+
+    .rect .handle.nw{ left:-6px; top:-6px; cursor:nwse-resize; }
+    .rect .handle.ne{ right:-6px; top:-6px; cursor:nesw-resize; }
+    .rect .handle.sw{ left:-6px; bottom:-6px; cursor:nesw-resize; }
+    .rect .handle.se{ right:-6px; bottom:-6px; cursor:nwse-resize; }
+
+  </style>
+</head>
+
+<body>
+  <aside>
+    <h1>Rectángulo en cuadrícula</h1>
+
+    <div class="row">
+      <div>
+        <label for="w">Ancho (celdas)</label>
+        <input id="w" type="number" min="1" max="40" value="6" />
+      </div>
+      <div>
+        <label for="h">Alto (celdas)</label>
+        <input id="h" type="number" min="1" max="30" value="4" />
+      </div>
+    </div>
+
+    <div class="row">
+      <button id="create" class="primary">Crear / aplicar tamaño</button>
+      <button id="remove" class="danger">Eliminar</button>
+    </div>
+
+    <div class="hint">
+      - Arrastra el rectángulo con el ratón.<br/>
+      - Se ajusta automáticamente a la cuadrícula (snap).<br/>
+      - En el siguiente paso podemos añadir resize con “handles”.
+    </div>
+  </aside>
+
+  <main>
+    <div id="canvas"></div>
+  </main>
+
+  <script>
+    // --- Config ---
+    const CELL = 24; // debe coincidir con --cell
+    const canvas = document.getElementById("canvas");
+    const btnCreate = document.getElementById("create");
+    const btnRemove = document.getElementById("remove");
+    const inputW = document.getElementById("w");
+    const inputH = document.getElementById("h");
+
+    let rect = null;
+
+    function clamp(n, min, max) {
+      return Math.max(min, Math.min(max, n));
+    }
+
+    function snap(px) {
+      return Math.round(px / CELL) * CELL;
+    }
+
+    function canvasSize() {
+      const r = canvas.getBoundingClientRect();
+      return { w: r.width, h: r.height };
+    }
+
+    function rectSizeFromInputs() {
+      const cw = clamp(parseInt(inputW.value || "1", 10), 1, 200);
+      const ch = clamp(parseInt(inputH.value || "1", 10), 1, 200);
+      return { wPx: cw * CELL, hPx: ch * CELL, wCells: cw, hCells: ch };
+    }
+
+    function ensureRect() {
+      if (rect) return rect;
+
+      rect = document.createElement("div");
+      rect.className = "rect";
+      rect.style.left = "0px";
+      rect.style.top = "0px";
+
+      const badge = document.createElement("div");
+      badge.className = "badge";
+      badge.textContent = "Rect";
+      rect.appendChild(badge);
+
+      // Handles de resize (esquinas)
+    for (const dir of ["nw","ne","sw","se"]) {
+    const h = document.createElement("div");
+    h.className = `handle ${dir}`;
+    h.dataset.dir = dir;
+    rect.appendChild(h);
+    }
+
+      canvas.appendChild(rect);
+
+      installDrag(rect);
+      installResize(rect);
+
+      return rect;
+    }
+
+    function updateBadge() {
+      if (!rect) return;
+      const wCells = Math.round(rect.offsetWidth / CELL);
+      const hCells = Math.round(rect.offsetHeight / CELL);
+      const xCells = Math.round(parseFloat(rect.style.left) / CELL);
+      const yCells = Math.round(parseFloat(rect.style.top) / CELL);
+      rect.querySelector(".badge").textContent = `${wCells}×${hCells} @ (${xCells},${yCells})`;
+    }
+
+    function applySize() {
+      const r = ensureRect();
+      const { wPx, hPx } = rectSizeFromInputs();
+      r.style.width = `${wPx}px`;
+      r.style.height = `${hPx}px`;
+
+      // Reajusta posición si se sale del canvas
+      const { w: cw, h: ch } = canvasSize();
+      const maxLeft = Math.max(0, cw - wPx);
+      const maxTop  = Math.max(0, ch - hPx);
+
+      const left = clamp(snap(parseFloat(r.style.left) || 0), 0, snap(maxLeft));
+      const top  = clamp(snap(parseFloat(r.style.top) || 0), 0, snap(maxTop));
+
+      r.style.left = `${left}px`;
+      r.style.top = `${top}px`;
+      updateBadge();
+    }
+
+    function removeRect() {
+      if (rect) {
+        rect.remove();
+        rect = null;
+      }
+    }
+
+    function installResize(el) {
+  let resizing = false;
+  let dir = "se";
+  let startPointer = { x: 0, y: 0 };
+  let startBox = { left: 0, top: 0, width: 0, height: 0 };
+
+  const MIN_W = 1 * CELL;
+  const MIN_H = 1 * CELL;
+
+  el.addEventListener("pointerdown", (e) => {
+    if (!e.target.classList.contains("handle")) return;
+
+    resizing = true;
+    dir = e.target.dataset.dir;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("dragging");
+
+    startPointer = { x: e.clientX, y: e.clientY };
+    startBox = {
+      left: parseFloat(el.style.left) || 0,
+      top: parseFloat(el.style.top) || 0,
+      width: el.offsetWidth,
+      height: el.offsetHeight
+    };
+
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  el.addEventListener("pointermove", (e) => {
+    if (!resizing) return;
+
+    const dx = e.clientX - startPointer.x;
+    const dy = e.clientY - startPointer.y;
+
+    let left = startBox.left;
+    let top = startBox.top;
+    let width = startBox.width;
+    let height = startBox.height;
+
+    // Ajuste según esquina
+    if (dir.includes("e")) width = startBox.width + dx;
+    if (dir.includes("s")) height = startBox.height + dy;
+
+    if (dir.includes("w")) {
+      width = startBox.width - dx;
+      left = startBox.left + dx;
+    }
+    if (dir.includes("n")) {
+      height = startBox.height - dy;
+      top = startBox.top + dy;
+    }
+
+    // Snap + mínimos
+    width = Math.max(MIN_W, snap(width));
+    height = Math.max(MIN_H, snap(height));
+    left = snap(left);
+    top = snap(top);
+
+    // Clamp al canvas (para que no se salga)
+    const { w: cw, h: ch } = canvasSize();
+
+    // Si estás tirando hacia W/N, al clamp de left/top hay que ajustar width/height también
+    // para no "teletransportar" el borde opuesto.
+    // Clamp left/top:
+    if (left < 0) {
+      if (dir.includes("w")) width = Math.max(MIN_W, width + left); // left negativo reduce width
+      left = 0;
+    }
+    if (top < 0) {
+      if (dir.includes("n")) height = Math.max(MIN_H, height + top);
+      top = 0;
+    }
+
+    // Clamp por derecha/abajo:
+    if (left + width > cw) {
+      width = Math.max(MIN_W, snap(cw - left));
+    }
+    if (top + height > ch) {
+      height = Math.max(MIN_H, snap(ch - top));
+    }
+
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.width = `${width}px`;
+    el.style.height = `${height}px`;
+    updateBadge();
+  });
+
+  function endResize(e) {
+    if (!resizing) return;
+    resizing = false;
+    el.classList.remove("dragging");
+    try { el.releasePointerCapture(e.pointerId); } catch {}
+  }
+
+  el.addEventListener("pointerup", endResize);
+  el.addEventListener("pointercancel", endResize);
+}
+
+
+    function installDrag(el) {
+      let dragging = false;
+      let startPointer = { x: 0, y: 0 };
+      let startPos = { left: 0, top: 0 };
+
+      el.addEventListener("pointerdown", (e) => {
+        if (e.target.classList.contains("handle")) return;
+        dragging = true;
+        el.setPointerCapture(e.pointerId);
+        el.classList.add("dragging");
+
+        startPointer = { x: e.clientX, y: e.clientY };
+        startPos = {
+          left: parseFloat(el.style.left) || 0,
+          top: parseFloat(el.style.top) || 0
+        };
+      });
+
+      el.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+
+        const dx = e.clientX - startPointer.x;
+        const dy = e.clientY - startPointer.y;
+
+        const desiredLeft = startPos.left + dx;
+        const desiredTop  = startPos.top + dy;
+
+        const { w: cw, h: ch } = canvasSize();
+        const wPx = el.offsetWidth;
+        const hPx = el.offsetHeight;
+
+        const maxLeft = Math.max(0, cw - wPx);
+        const maxTop  = Math.max(0, ch - hPx);
+
+        const left = clamp(snap(desiredLeft), 0, snap(maxLeft));
+        const top  = clamp(snap(desiredTop), 0, snap(maxTop));
+
+        el.style.left = `${left}px`;
+        el.style.top = `${top}px`;
+        updateBadge();
+      });
+
+      function endDrag(e) {
+        if (!dragging) return;
+        dragging = false;
+        el.classList.remove("dragging");
+        try { el.releasePointerCapture(e.pointerId); } catch {}
+      }
+
+      el.addEventListener("pointerup", endDrag);
+      el.addEventListener("pointercancel", endDrag);
+
+      // Si redimensionas la ventana, evita que quede fuera
+      window.addEventListener("resize", () => {
+        if (!rect) return;
+        applySize();
+      });
+    }
+
+    // --- UI wiring ---
+    btnCreate.addEventListener("click", applySize);
+    btnRemove.addEventListener("click", removeRect);
+
+    // crea uno por defecto
+    applySize();
+  </script>
+</body>
+</html>
