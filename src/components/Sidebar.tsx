@@ -87,6 +87,8 @@ export default function Sidebar() {
   const multiSelectedIds = useMemo(() => nodes.filter((n) => n.selected).map((n) => n.id), [nodes]);
   const canUndo = useFM((s) => s.past.length > 0);
   const canRedo = useFM((s) => s.future.length > 0);
+  const hideConstraints = useFM((s) => s.hideConstraints);
+  const toggleHideConstraints = useFM((s) => s.toggleHideConstraints);
   const activeTab = useFM((s) => s.tabs.find((t) => t.id === s.activeId));
   const safeName = (activeTab?.name || "feature-model").trim().replace(/[^\w\-.]+/g, "_").replace(/_+/g, "_") || "feature-model";
 
@@ -246,7 +248,7 @@ export default function Sidebar() {
 
       {/* ========== TOOLBAR ========== */}
       {!isEmptyTab && (
-      <div className="px-3 pt-3">
+      <div className="px-3 pt-3 space-y-2">
         <div className="grid grid-cols-4 gap-2">
           <button
             className={btn}
@@ -267,6 +269,17 @@ export default function Sidebar() {
             }}
           >✕ Clear</button>
         </div>
+        <button
+          className={`w-full px-3 py-1.5 rounded-md border text-[12.5px] transition-colors ${
+            hideConstraints
+              ? "bg-amber-500 text-white border-amber-600 hover:bg-amber-600"
+              : "bg-white border-black/10 text-black/70 hover:bg-black/[.04]"
+          }`}
+          title="Show/hide requires and excludes arrows on the canvas (constraints themselves are kept)"
+          onClick={toggleHideConstraints}
+        >
+          {hideConstraints ? "👁 Constraint arrows hidden — click to show" : "⤫ Hide constraint arrows"}
+        </button>
       </div>
       )}
 

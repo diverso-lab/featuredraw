@@ -26,6 +26,7 @@ function Inner() {
   const { nodes, edges: rawEdges, onNodesChange, onEdgesChange, onConnect, select, deleteNode, selectEdge, deleteEdge } = useFM();
   const constraints = useFM((s) => s.constraints);
   const deleteConstraint = useFM((s) => s.deleteConstraint);
+  const hideConstraints = useFM((s) => s.hideConstraints);
   const selectedId = useFM((s) => s.selectedId);
   const selectedEdgeId = useFM((s) => s.selectedEdgeId);
 
@@ -33,6 +34,7 @@ function Inner() {
   // Each one gets its own lane Y below the tree so they never overlap, and
   // they render behind feature nodes thanks to a negative zIndex.
   const constraintEdges = useMemo(() => {
+    if (hideConstraints) return [] as any[];
     let maxBottom = 0;
     for (const n of nodes) {
       const b = n.position.y + 80;
@@ -67,7 +69,7 @@ function Inner() {
         };
       })
       .filter(Boolean) as any[];
-  }, [nodes, constraints, selectedEdgeId]);
+  }, [nodes, constraints, selectedEdgeId, hideConstraints]);
 
   const edges = useMemo(
     () => [

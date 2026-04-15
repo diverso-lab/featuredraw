@@ -26,6 +26,9 @@ type State = {
   selectedEdgeId: string | null;
   /** Node whose name is being edited inline (triggered by F2). */
   editingNodeId: string | null;
+  /** Hide the requires/excludes arrows in the canvas (keeps data intact). */
+  hideConstraints: boolean;
+  toggleHideConstraints: () => void;
 
   // interactive constraint wiring
   pendingConstraint: { kind: "requires" | "excludes"; fromId: string } | null;
@@ -275,6 +278,8 @@ export const useFM = create<State>()(persist((set, get) => {
     selectedId: null,
     selectedEdgeId: null,
     editingNodeId: null,
+    hideConstraints: false,
+    toggleHideConstraints: () => set({ hideConstraints: !get().hideConstraints }),
     pendingConstraint: null,
     past: [],
     future: [],
@@ -1105,6 +1110,7 @@ export const useFM = create<State>()(persist((set, get) => {
     tabs: s.tabs,
     activeId: s.activeId,
     _snapshots: s._snapshots,
+    hideConstraints: s.hideConstraints,
   }) as any,
   // Incompatible persisted snapshots (from earlier revisions) would produce
   // dangling `inGroup` flags with no matching group entry — the diagram
