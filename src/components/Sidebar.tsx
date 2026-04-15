@@ -1,10 +1,11 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useFM } from "@/lib/store";
 import { toUVL } from "@/lib/uvl";
 import { parseUVL } from "@/lib/uvlParser";
+import { parseVisualConstraints } from "@/lib/constraintParser";
 import { buildSVG, exportJPG, exportPDF, exportPNG, exportSVG } from "@/lib/exporter";
-import UvlCodeView from "./UvlCodeView";
+import UvlCodeView, { type RelKind } from "./UvlCodeView";
 import type { FeatureType } from "@/lib/types";
 
 /* -------- tiny UI helpers (same visual language as ContextMenu) -------- */
@@ -76,12 +77,14 @@ function Segmented<T extends string>({
 export default function Sidebar() {
   const {
     nodes, edges, groups, constraints, selectedId,
-    addFeature, deleteNode, updateNode, setParentRel,
+    addFeature, deleteNode, updateNode, setParentRel, select,
     createGroup, updateGroup, deleteGroup,
     addConstraint, updateConstraint, deleteConstraint,
     reset, loadModel,
     undo, redo, relayout,
+    alignNodes, distributeNodes,
   } = useFM();
+  const multiSelectedIds = useMemo(() => nodes.filter((n) => n.selected).map((n) => n.id), [nodes]);
   const canUndo = useFM((s) => s.past.length > 0);
   const canRedo = useFM((s) => s.future.length > 0);
   const activeTab = useFM((s) => s.tabs.find((t) => t.id === s.activeId));
@@ -95,6 +98,59 @@ export default function Sidebar() {
   );
 
   const uvlText = useMemo(() => toUVL(nodes, edges, groups, constraints), [nodes, edges, groups, constraints]);
+  const featureNamesSet = useMemo(() => new Set(nodes.map((n) => n.data.name)), [nodes]);
+
+  const selectedEdgeId = useFM((s) => s.selectedEdgeId);
+  const selectEdges = useFM((s) => s.selectEdges);
+
+  // Map the currently-selected tree edge back to a (parentName, kind, childNames)
+  // triple so the UVL view can highlight the matching keyword line. The
+  // childNames list distinguishes two `mandatory` blocks under the same parent
+  // (e.g. one for loose mandatory, one for an `and`-group).
+  const highlightedRel = useMemo<{ parentName: string; kind: RelKind; childNames: string[] } | null>(() => {
+    if (!selectedEdgeId || selectedEdgeId.startsWith("cons_")) return null;
+    const e = edges.find((x) => x.id === selectedEdgeId);
+    if (!e) return null;
+    const parent = nodes.find((n) => n.id === e.source);
+    if (!parent) return null;
+    const g = groups.find((gr) => gr.parentId === e.source && gr.childrenIds.includes(e.target));
+    const kind: RelKind = g
+      ? (g.type === "and" ? ((e.data as any)?.parentRel === "optional" ? "optional" : "mandatory")
+        : g.type === "or" ? "or"
+        : g.type === "alternative" ? "alternative"
+        : "cardinality")
+      : ((e.data as any)?.parentRel === "optional" ? "optional" : "mandatory");
+    // Siblings that form the same block: either all children of the group,
+    // or all loose (non-grouped) children of this parent with the same rel.
+    const childNames = g
+      ? g.childrenIds.map((cid) => nodes.find((n) => n.id === cid)?.data.name ?? "")
+      : edges
+          .filter((x) =>
+            x.source === parent.id &&
+            !(x.data as any)?.inGroup &&
+            (((x.data as any)?.parentRel ?? "mandatory") === kind)
+          )
+          .map((x) => nodes.find((n) => n.id === x.target)?.data.name ?? "");
+    return { parentName: parent.data.name, kind, childNames: childNames.filter(Boolean) };
+  }, [selectedEdgeId, edges, nodes, groups]);
+
+  const pickRel = (parentName: string, kind: RelKind, childNames: string[]) => {
+    const parent = nodes.find((n) => n.data.name === parentName);
+    if (!parent) return;
+    // Resolve child names to node ids under this specific parent.
+    const childIdsOfParent = edges
+      .filter((e) => e.source === parent.id)
+      .map((e) => e.target);
+    const targetIds = new Set(
+      childNames
+        .map((name) => nodes.find((n) => n.data.name === name && childIdsOfParent.includes(n.id))?.id)
+        .filter(Boolean) as string[]
+    );
+    const matchIds = edges
+      .filter((e) => e.source === parent.id && targetIds.has(e.target))
+      .map((e) => e.id);
+    if (matchIds.length) selectEdges(matchIds);
+  };
 
   const [exportLegend, setExportLegend] = useState(true);
   const [exportTransparent, setExportTransparent] = useState(false);
@@ -104,6 +160,36 @@ export default function Sidebar() {
   const [uvlInput, setUvlInput] = useState("");
   const [parseMsg, setParseMsg] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+
+  // Rename field uses a local draft so the user can keep typing even when the
+  // intermediate value collides with another feature — the store silently
+  // rejects clashes and we surface the reason as a hint under the input.
+  const [nameDraft, setNameDraft] = useState("");
+  useEffect(() => { setNameDraft(selected?.data.name ?? ""); }, [selected?.id, selected?.data.name]);
+  const nameDraftTrim = nameDraft.trim();
+  const nameError =
+    selected == null
+      ? null
+      : !nameDraftTrim
+      ? "Name cannot be empty."
+      : nodes.some((n) => n.id !== selected.id && n.data.name === nameDraftTrim)
+      ? `"${nameDraftTrim}" is already used by another feature.`
+      : null;
+
+  const orphanNames = useMemo(() => {
+    const known = new Set(nodes.map((n) => n.data.name));
+    const re = /"([^"]+)"|([A-Za-z_][\w]*)/g;
+    const kw = new Set(["true", "false", "and", "or", "not"]);
+    const missing = new Set<string>();
+    for (const c of constraints) {
+      for (const m of c.expr.matchAll(re)) {
+        const raw = (m[1] ?? m[2] ?? "").trim();
+        if (!raw || kw.has(raw.toLowerCase())) continue;
+        if (!known.has(raw)) missing.add(raw);
+      }
+    }
+    return [...missing];
+  }, [constraints, nodes]);
 
   const buildSVGWithOpts = () =>
     buildSVG(nodes, edges, groups, {
@@ -146,12 +232,14 @@ export default function Sidebar() {
     <aside className="w-[380px] shrink-0 h-full overflow-y-auto bg-[#f3f4f6] border-r border-black/10">
       {/* ========== TITLE BAR ========== */}
       <div className="sticky top-0 z-10 px-4 py-3 bg-white/90 backdrop-blur border-b border-black/10 flex items-center gap-2">
-        <div className="flex-1 min-w-0">
-          <h1 className="text-[15px] font-bold tracking-tight">FeatureDraw</h1>
-          <p className="text-[11px] text-black/50 -mt-0.5 truncate">
+        <div className="flex-1 min-w-0 flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.svg" alt="FeatureDraw" className="h-8 w-auto shrink-0" />
+          <p className="text-[11px] text-black/50 truncate">
             Editing: <span className="text-black/70 font-medium">{activeTab?.name ?? ""}</span>
           </p>
         </div>
+        <SaveIndicator />
         <button className={iconBtn} title="Undo (⌘Z)" onClick={undo} disabled={!canUndo}>↶</button>
         <button className={iconBtn} title="Redo (⇧⌘Z)" onClick={redo} disabled={!canRedo}>↷</button>
       </div>
@@ -170,7 +258,14 @@ export default function Sidebar() {
           >＋ Add</button>
           <button className={btn} title="Auto-layout the tree" onClick={relayout}>⇅ Layout</button>
           <button className={btn} title="Load eShop sample" onClick={() => reset(true)}>⟳ Sample</button>
-          <button className={btn} title="Clear canvas" onClick={() => reset(false)}>✕ Clear</button>
+          <button
+            className={btn}
+            title="Clear canvas"
+            onClick={() => {
+              if (nodes.length === 0 && constraints.length === 0) return reset(false);
+              if (confirm("Clear the canvas? This will remove all features and constraints. You can undo with ⌘Z.")) reset(false);
+            }}
+          >✕ Clear</button>
         </div>
       </div>
       )}
@@ -237,7 +332,17 @@ export default function Sidebar() {
           accent="#22a06b"
           right={<span className={chip}>auto</span>}
         >
-          <UvlCodeView code={uvlText} />
+          <UvlCodeView
+            code={uvlText}
+            selectedName={selected?.data.name ?? null}
+            featureNames={featureNamesSet}
+            onPickName={(name) => {
+              const n = nodes.find((x) => x.data.name === name);
+              if (n) select(n.id);
+            }}
+            onPickRel={pickRel}
+            highlightedRel={highlightedRel}
+          />
           <div className="grid grid-cols-2 gap-2">
             <button className={btnPrimary} onClick={doDownloadUVL}>↓ Download {safeName}.uvl</button>
             <button className={btn} onClick={() => navigator.clipboard.writeText(uvlText)}>⧉ Copy</button>
@@ -247,25 +352,15 @@ export default function Sidebar() {
 
         {!isEmptyTab && (<>
         {/* ========== CROSS-TREE CONSTRAINTS — right after UVL ========== */}
-        <Card title="Cross-tree constraints" accent="#d98e00" right={
-          <button className="text-[11px] text-blue-600 hover:underline" onClick={() => addConstraint("A => B")}>+ add</button>
-        }>
-          {constraints.length === 0 && (
-            <div className="text-[11px] text-black/40 italic">None</div>
-          )}
-          <div className="space-y-1">
-            {constraints.map((c) => (
-              <div key={c.id} className="grid grid-cols-[1fr_auto] gap-1">
-                <input
-                  className={input + " font-mono text-[12px]"}
-                  value={c.expr}
-                  onChange={(e) => updateConstraint(c.id, e.target.value)}
-                />
-                <button className="px-2 text-black/30 hover:text-red-500" onClick={() => deleteConstraint(c.id)}>✕</button>
-              </div>
-            ))}
-          </div>
-        </Card>
+        <ConstraintsCard
+          nodes={nodes}
+          constraints={constraints}
+          orphanNames={orphanNames}
+          addConstraint={addConstraint}
+          updateConstraint={updateConstraint}
+          deleteConstraint={deleteConstraint}
+        />
+
 
         {/* ========== EXPORT IMAGE ========== */}
         <Card title="Export image" accent="#b255d9">
@@ -300,6 +395,47 @@ export default function Sidebar() {
           <div className="text-[10.5px] text-black/40">Files saved as <span className="font-mono text-black/60">{safeName}.*</span></div>
         </Card>
 
+        {/* ========== ARRANGE: multi-selection ========== */}
+        {multiSelectedIds.length >= 2 && (
+          <Card title={`Arrange · ${multiSelectedIds.length} selected`} accent="#6b7280">
+            <div className="space-y-2">
+              <div>
+                <span className="block text-[11px] text-black/50 mb-1">Align horizontally</span>
+                <div className="grid grid-cols-3 gap-2">
+                  <button className={btn} title="Align left" onClick={() => alignNodes(multiSelectedIds, "left")}>⇤ Left</button>
+                  <button className={btn} title="Align center" onClick={() => alignNodes(multiSelectedIds, "centerH")}>↔ Center</button>
+                  <button className={btn} title="Align right" onClick={() => alignNodes(multiSelectedIds, "right")}>⇥ Right</button>
+                </div>
+              </div>
+              <div>
+                <span className="block text-[11px] text-black/50 mb-1">Align vertically</span>
+                <div className="grid grid-cols-3 gap-2">
+                  <button className={btn} title="Align top" onClick={() => alignNodes(multiSelectedIds, "top")}>⤒ Top</button>
+                  <button className={btn} title="Align middle" onClick={() => alignNodes(multiSelectedIds, "middleV")}>↕ Middle</button>
+                  <button className={btn} title="Align bottom" onClick={() => alignNodes(multiSelectedIds, "bottom")}>⤓ Bottom</button>
+                </div>
+              </div>
+              <div>
+                <span className="block text-[11px] text-black/50 mb-1">Distribute</span>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    className={btn + (multiSelectedIds.length < 3 ? " opacity-40 cursor-not-allowed" : "")}
+                    disabled={multiSelectedIds.length < 3}
+                    title="Distribute horizontally (needs 3+)"
+                    onClick={() => distributeNodes(multiSelectedIds, "h")}
+                  >⇔ Horizontal</button>
+                  <button
+                    className={btn + (multiSelectedIds.length < 3 ? " opacity-40 cursor-not-allowed" : "")}
+                    disabled={multiSelectedIds.length < 3}
+                    title="Distribute vertically (needs 3+)"
+                    onClick={() => distributeNodes(multiSelectedIds, "v")}
+                  >⇕ Vertical</button>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* ========== EDITOR: selected feature ========== */}
         <Card
           title="Editor"
@@ -321,10 +457,16 @@ export default function Sidebar() {
             <>
               <Field label="Name">
                 <input
-                  className={input}
-                  value={selected.data.name}
-                  onChange={(e) => updateNode(selected.id, { name: e.target.value })}
+                  className={input + (nameError ? " border-red-400 focus:border-red-500" : "")}
+                  value={nameDraft}
+                  onChange={(e) => {
+                    setNameDraft(e.target.value);
+                    updateNode(selected.id, { name: e.target.value });
+                  }}
                 />
+                {nameError && (
+                  <span className="block mt-1 text-[11px] text-red-600">{nameError}</span>
+                )}
               </Field>
 
               <Field label="Type">
@@ -534,5 +676,201 @@ export default function Sidebar() {
         <div className="h-2" />
       </div>
     </aside>
+  );
+}
+
+/* ====================== save indicator ================================= */
+
+function SaveIndicator() {
+  // Zustand's persist writes on every set(), so we treat any mutation as
+  // "saved the next tick". We flash "Saving…" briefly then show a relative
+  // timestamp so the user knows autosave is wired up.
+  const [savedAt, setSavedAt] = useState(() => Date.now());
+  const [saving, setSaving] = useState(false);
+  const [, force] = useState(0);
+
+  useEffect(() => {
+    const unsub = useFM.subscribe((s, prev) => {
+      if (
+        s.nodes !== prev.nodes ||
+        s.edges !== prev.edges ||
+        s.groups !== prev.groups ||
+        s.constraints !== prev.constraints
+      ) {
+        setSaving(true);
+        const t = setTimeout(() => {
+          setSavedAt(Date.now());
+          setSaving(false);
+        }, 250);
+        return () => clearTimeout(t);
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => force((x) => x + 1), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const ago = Math.max(0, Math.round((Date.now() - savedAt) / 1000));
+  const rel =
+    ago < 5 ? "just now" : ago < 60 ? `${ago}s ago` : ago < 3600 ? `${Math.round(ago / 60)}m ago` : `${Math.round(ago / 3600)}h ago`;
+
+  return (
+    <span
+      className="text-[10.5px] text-black/45 mr-1 whitespace-nowrap"
+      title="Autosaved to localStorage"
+    >
+      {saving ? (
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" /> Saving…</span>
+      ) : (
+        <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> Saved · {rel}</span>
+      )}
+    </span>
+  );
+}
+
+/* ====================== constraints card (visual editor) ================= */
+
+function ConstraintsCard({
+  nodes, constraints, orphanNames,
+  addConstraint, updateConstraint, deleteConstraint,
+}: {
+  nodes: ReturnType<typeof useFM>["nodes"];
+  constraints: ReturnType<typeof useFM>["constraints"];
+  orphanNames: string[];
+  addConstraint: (expr: string) => void;
+  updateConstraint: (id: string, expr: string) => void;
+  deleteConstraint: (id: string) => void;
+}) {
+  const names = useMemo(() => nodes.map((n) => n.data.name).sort((a, b) => a.localeCompare(b)), [nodes]);
+  const visualMap = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof parseVisualConstraints>[number]>();
+    for (const v of parseVisualConstraints(constraints)) m.set(v.id, v);
+    return m;
+  }, [constraints]);
+
+  const q = (n: string) => (/^[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : `"${n}"`);
+  const build = (kind: "requires" | "excludes", a: string, b: string) =>
+    kind === "requires" ? `${q(a)} => ${q(b)}` : `!(${q(a)} & ${q(b)})`;
+
+  const addVisual = () => {
+    if (names.length < 2) return;
+    addConstraint(build("requires", names[0], names[1]));
+  };
+  const addAdvanced = () => {
+    // Seed with a valid stub so the UVL stays parseable.
+    addConstraint(names.length >= 2 ? `(${q(names[0])} & ${q(names[1])}) => true` : "true");
+  };
+
+  // Per-row override: force the text editor even if the expression is
+  // currently parseable. Useful to convert a visual row into a complex one.
+  const [forceText, setForceText] = useState<Record<string, boolean>>({});
+
+  return (
+    <Card
+      title="Cross-tree constraints"
+      accent="#d98e00"
+      right={
+        <span className="flex items-center gap-2">
+          <button
+            className="text-[11px] text-blue-600 hover:underline disabled:text-black/30"
+            disabled={names.length < 2}
+            title={names.length < 2 ? "Need at least two features" : "Add a requires/excludes constraint"}
+            onClick={addVisual}
+          >+ add</button>
+          <button
+            className="text-[11px] text-black/50 hover:text-black hover:underline"
+            title="Add a free-form constraint (e.g. (A & B) => C)"
+            onClick={addAdvanced}
+          >+ advanced</button>
+        </span>
+      }
+    >
+      {constraints.length === 0 && (
+        <div className="text-[11px] text-black/40 italic">None</div>
+      )}
+      {orphanNames.length > 0 && (
+        <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+          Unknown feature{orphanNames.length > 1 ? "s" : ""} referenced:{" "}
+          <span className="font-mono">{orphanNames.join(", ")}</span>
+        </div>
+      )}
+      <div className="space-y-1.5">
+        {constraints.map((c) => {
+          const v = visualMap.get(c.id);
+          if (v && !forceText[c.id]) {
+            const left = v.kind === "requires" ? v.from : v.a;
+            const right = v.kind === "requires" ? v.to : v.b;
+            const setPart = (part: "kind" | "left" | "right", value: string) => {
+              const next = {
+                kind: part === "kind" ? (value as "requires" | "excludes") : v.kind,
+                left: part === "left" ? value : left,
+                right: part === "right" ? value : right,
+              };
+              if (next.left === next.right) return;
+              updateConstraint(c.id, build(next.kind, next.left, next.right));
+            };
+            const missing = !names.includes(left) || !names.includes(right);
+            return (
+              <div key={c.id} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_auto] gap-1 items-center">
+                <select
+                  className={`px-1.5 py-1 rounded-md bg-white border text-[12px] outline-none ${missing && !names.includes(left) ? "border-amber-400" : "border-black/15"}`}
+                  value={names.includes(left) ? left : ""}
+                  onChange={(e) => setPart("left", e.target.value)}
+                >
+                  {!names.includes(left) && <option value="">{left} (missing)</option>}
+                  {names.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+                <select
+                  className="px-1.5 py-1 rounded-md bg-black/[.04] border border-black/15 text-[12px] outline-none appearance-none text-center font-mono"
+                  value={v.kind}
+                  onChange={(e) => setPart("kind", e.target.value)}
+                  title={v.kind === "requires" ? "A requires B" : "A excludes B"}
+                >
+                  <option value="requires">⇒</option>
+                  <option value="excludes">✕</option>
+                </select>
+                <select
+                  className={`px-1.5 py-1 rounded-md bg-white border text-[12px] outline-none ${missing && !names.includes(right) ? "border-amber-400" : "border-black/15"}`}
+                  value={names.includes(right) ? right : ""}
+                  onChange={(e) => setPart("right", e.target.value)}
+                >
+                  {!names.includes(right) && <option value="">{right} (missing)</option>}
+                  {names.map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+                <button
+                  className="px-1 text-[10px] text-black/40 hover:text-black"
+                  title="Edit as text (switch to advanced)"
+                  onClick={() => setForceText((m) => ({ ...m, [c.id]: true }))}
+                >{"{ }"}</button>
+                <button className="px-1.5 text-black/30 hover:text-red-500" onClick={() => deleteConstraint(c.id)}>✕</button>
+              </div>
+            );
+          }
+          // Advanced / non-visual expression — raw text input.
+          const canSwitchBack = !!visualMap.get(c.id);
+          return (
+            <div key={c.id} className="grid grid-cols-[1fr_auto_auto] gap-1 items-center">
+              <input
+                className="w-full px-2 py-1 rounded-md bg-white border border-black/15 text-black outline-none focus:border-blue-500 font-mono text-[12px]"
+                value={c.expr}
+                onChange={(e) => updateConstraint(c.id, e.target.value)}
+                title="Free-form constraint (UVL propositional expression)"
+              />
+              {canSwitchBack && (
+                <button
+                  className="px-1 text-[10px] text-black/40 hover:text-black"
+                  title="Back to visual editor"
+                  onClick={() => setForceText((m) => { const { [c.id]: _, ...rest } = m; void _; return rest; })}
+                >◨</button>
+              )}
+              <button className="px-2 text-black/30 hover:text-red-500" onClick={() => deleteConstraint(c.id)}>✕</button>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }

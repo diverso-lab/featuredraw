@@ -6,8 +6,13 @@ import type { FeatureType } from "@/lib/types";
 type Props = {
   x: number;
   y: number;
+  /** Canvas (flow) coordinates where the menu was opened — used to place a
+   *  new feature at the click point instead of at a screen-pixel offset. */
+  flowX?: number;
+  flowY?: number;
   nodeId?: string | null;
   edgeId?: string | null;
+  multiIds?: string[];
   onClose: () => void;
 };
 
@@ -70,7 +75,7 @@ const Header = ({ children }: { children: React.ReactNode }) => (
   </div>
 );
 
-export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
+export default function ContextMenu({ x, y, flowX, flowY, nodeId, edgeId, multiIds, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const {
     nodes, edges, groups,
@@ -79,9 +84,12 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
     deleteEdge,
     relayout,
     startConstraint,
+    duplicateNode,
+    deleteNodes, copySelection, pasteClipboard,
+    alignNodes, distributeNodes,
   } = useFM();
 
-  const [submenu, setSubmenu] = useState<"type" | "group" | null>(null);
+  const [submenu, setSubmenu] = useState<"type" | "group" | "multi-type" | "multi-group" | "multi-align" | "multi-distribute" | null>(null);
   const [pos, setPos] = useState({ x, y });
 
   useEffect(() => {
@@ -124,7 +132,14 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
   const rename = () => {
     if (!node) return;
     const next = prompt("New name:", node.data.name);
-    if (next && next.trim()) updateNode(node.id, { name: next.trim() });
+    const trimmed = next?.trim();
+    if (trimmed) {
+      if (useFM.getState().isDuplicateName(node.id, trimmed)) {
+        alert(`A feature named "${trimmed}" already exists.`);
+      } else {
+        updateNode(node.id, { name: trimmed });
+      }
+    }
     onClose();
   };
   const changeType = (t: FeatureType) => { if (node) updateNode(node.id, { featureType: t }); onClose(); };
@@ -158,6 +173,59 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
     onClose();
   };
 
+  /* -------------- multi-selection helpers ----------------------------- */
+  const multi = multiIds ?? [];
+  const multiNodes = multi.map((id) => nodes.find((n) => n.id === id)).filter(Boolean) as typeof nodes;
+  // All selected features share the same parent? (sibling group candidate)
+  const parents = new Set<string | undefined>();
+  for (const n of multiNodes) {
+    const pe = edges.find((e) => e.target === n.id);
+    parents.add(pe?.source);
+  }
+  const sharedParent = parents.size === 1 ? [...parents][0] : undefined;
+  const canGroup = !!sharedParent && multi.length >= 2;
+  // Do the selected IDs exactly match an existing group under that parent?
+  const matchingGroup = canGroup
+    ? groups.find((g) =>
+        g.parentId === sharedParent &&
+        g.childrenIds.length === multi.length &&
+        g.childrenIds.every((c) => multi.includes(c))
+      )
+    : undefined;
+  const multiSetRel = (rel: "mandatory" | "optional") => {
+    for (const id of multi) setParentRel(id, rel);
+    onClose();
+  };
+  const multiSetType = (t: FeatureType) => {
+    for (const id of multi) updateNode(id, { featureType: t });
+    onClose();
+  };
+  const multiDelete = () => { deleteNodes(multi); onClose(); };
+  const multiDuplicate = () => {
+    copySelection(multi);
+    pasteClipboard();
+    onClose();
+  };
+  const multiCopy = () => { copySelection(multi); onClose(); };
+  const multiGroup = (type: "alternative" | "or" | "cardinality") => {
+    if (!canGroup || !sharedParent) return;
+    if (matchingGroup) deleteGroup(matchingGroup.id);
+    createGroup(sharedParent, multi, type);
+    onClose();
+  };
+  const multiUngroup = () => {
+    if (matchingGroup) deleteGroup(matchingGroup.id);
+    onClose();
+  };
+  const multiAlign = (mode: "left" | "centerH" | "right" | "top" | "middleV" | "bottom") => {
+    alignNodes(multi, mode);
+    onClose();
+  };
+  const multiDistribute = (axis: "h" | "v") => {
+    distributeNodes(multi, axis);
+    onClose();
+  };
+
   return (
     <div
       ref={ref}
@@ -166,7 +234,131 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
     >
       <style>{`@keyframes ctxfade { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }`}</style>
 
-      {edge ? (
+      {multi.length >= 2 ? (
+        <>
+          <div className="flex items-center gap-2 px-3 py-1.5">
+            <span className="w-4 h-4 grid place-items-center rounded bg-blue-500 text-white text-[10px] font-bold">{multi.length}</span>
+            <span className="text-[13px] font-semibold text-black/90 truncate">features selected</span>
+          </div>
+          <Separator />
+
+          <MenuItem icon="⎘" label="Duplicate" shortcut="⌘D" onClick={multiDuplicate} />
+          <MenuItem icon="⧉" label="Copy" shortcut="⌘C" onClick={multiCopy} />
+          <Separator />
+
+          <Header>Relation to parent</Header>
+          <MenuItem
+            icon={<span className="w-2 h-2 rounded-full bg-black inline-block" />}
+            label="All mandatory"
+            onClick={() => multiSetRel("mandatory")}
+          />
+          <MenuItem
+            icon={<span className="w-2 h-2 rounded-full bg-white border border-black inline-block" />}
+            label="All optional"
+            onClick={() => multiSetRel("optional")}
+          />
+
+          <Separator />
+          <div className="relative">
+            <MenuItem
+              icon="◧"
+              label="Set type"
+              hasSubmenu
+              onHover={() => setSubmenu("multi-type")}
+              onClick={() => setSubmenu(submenu === "multi-type" ? null : "multi-type")}
+            />
+            {submenu === "multi-type" && (
+              <div className="absolute left-full top-0 ml-1 min-w-[150px] py-1.5 rounded-xl bg-white/95 backdrop-blur border border-black/10 shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+                {(["Boolean", "Integer", "Float", "String"] as FeatureType[]).map((t) => (
+                  <MenuItem
+                    key={t}
+                    icon={<span className="w-2.5 h-2.5 rounded-full inline-block" style={{ background: typeColor[t] }} />}
+                    label={t}
+                    onClick={() => multiSetType(t)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="relative">
+            <MenuItem
+              icon="⌒"
+              label={
+                <span>
+                  {matchingGroup ? "Group" : "Group as…"}
+                  {matchingGroup && (
+                    <span className="ml-1.5 text-[11px] text-black/40 group-hover:text-white/80">
+                      {matchingGroup.type}
+                    </span>
+                  )}
+                  {!canGroup && (
+                    <span className="ml-1.5 text-[11px] text-black/40 group-hover:text-white/80">siblings only</span>
+                  )}
+                </span>
+              }
+              hasSubmenu
+              disabled={!canGroup}
+              onHover={() => canGroup && setSubmenu("multi-group")}
+              onClick={() => canGroup && setSubmenu(submenu === "multi-group" ? null : "multi-group")}
+            />
+            {submenu === "multi-group" && canGroup && (
+              <div className="absolute left-full top-0 ml-1 min-w-[220px] py-1.5 rounded-xl bg-white/95 backdrop-blur border border-black/10 shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+                <MenuItem icon="△" label="Alternative (XOR)" check={matchingGroup?.type === "alternative"} onClick={() => multiGroup("alternative")} />
+                <MenuItem icon="▲" label="Or (≥1)" check={matchingGroup?.type === "or"} onClick={() => multiGroup("or")} />
+                <MenuItem icon="[…]" label="Cardinality [n..m]" check={matchingGroup?.type === "cardinality"} onClick={() => multiGroup("cardinality")} />
+                {matchingGroup && (
+                  <>
+                    <Separator />
+                    <MenuItem icon="↺" label="Ungroup" onClick={multiUngroup} />
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          <Separator />
+          <div className="relative">
+            <MenuItem
+              icon="⇔"
+              label="Align"
+              hasSubmenu
+              onHover={() => setSubmenu("multi-align")}
+              onClick={() => setSubmenu(submenu === "multi-align" ? null : "multi-align")}
+            />
+            {submenu === "multi-align" && (
+              <div className="absolute left-full top-0 ml-1 min-w-[170px] py-1.5 rounded-xl bg-white/95 backdrop-blur border border-black/10 shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+                <MenuItem icon="⇤" label="Left" onClick={() => multiAlign("left")} />
+                <MenuItem icon="↔" label="Center H" onClick={() => multiAlign("centerH")} />
+                <MenuItem icon="⇥" label="Right" onClick={() => multiAlign("right")} />
+                <Separator />
+                <MenuItem icon="⤒" label="Top" onClick={() => multiAlign("top")} />
+                <MenuItem icon="↕" label="Middle V" onClick={() => multiAlign("middleV")} />
+                <MenuItem icon="⤓" label="Bottom" onClick={() => multiAlign("bottom")} />
+              </div>
+            )}
+          </div>
+          <div className="relative">
+            <MenuItem
+              icon="⇔"
+              label="Distribute"
+              hasSubmenu
+              disabled={multi.length < 3}
+              onHover={() => multi.length >= 3 && setSubmenu("multi-distribute")}
+              onClick={() => multi.length >= 3 && setSubmenu(submenu === "multi-distribute" ? null : "multi-distribute")}
+            />
+            {submenu === "multi-distribute" && multi.length >= 3 && (
+              <div className="absolute left-full top-0 ml-1 min-w-[170px] py-1.5 rounded-xl bg-white/95 backdrop-blur border border-black/10 shadow-[0_10px_30px_rgba(0,0,0,0.15)]">
+                <MenuItem icon="⇔" label="Horizontal" onClick={() => multiDistribute("h")} />
+                <MenuItem icon="⇕" label="Vertical" onClick={() => multiDistribute("v")} />
+              </div>
+            )}
+          </div>
+
+          <Separator />
+          <MenuItem icon="🗑" label={`Delete ${multi.length} features`} shortcut="⌫" danger onClick={multiDelete} />
+        </>
+      ) : edge ? (
         <>
           <div className="flex items-center gap-2 px-3 py-1.5">
             <span
@@ -227,6 +419,7 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
           <Separator />
 
           <MenuItem icon="✎" label="Rename…" shortcut="F2" onClick={rename} />
+          <MenuItem icon="⎘" label="Duplicate feature" shortcut="⌘D" onClick={() => { duplicateNode(node.id); onClose(); }} />
           <MenuItem icon="＋" label="Add child feature" shortcut="⏎" onClick={addChild} />
 
           {hasParent && (
@@ -360,7 +553,16 @@ export default function ContextMenu({ x, y, nodeId, edgeId, onClose }: Props) {
       ) : (
         <>
           <Header>Canvas</Header>
-          <MenuItem icon="＋" label="Add feature here" onClick={() => { addFeature({ x: x + 20, y: y + 20 }, null); onClose(); }} />
+          <MenuItem
+            icon="＋"
+            label="Add feature here"
+            onClick={() => {
+              const px = flowX ?? x;
+              const py = flowY ?? y;
+              addFeature({ x: px, y: py }, null);
+              onClose();
+            }}
+          />
           <Separator />
           <Header>Arrange</Header>
           <MenuItem

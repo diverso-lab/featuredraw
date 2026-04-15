@@ -32,6 +32,15 @@ export default function FeatureNode({ data, selected, id }: NodeProps) {
     if (editing) { ref.current?.focus(); ref.current?.select(); }
   }, [editing]);
 
+  // Respond to an external "start editing" signal (F2 shortcut in Canvas).
+  const editingNodeId = useFM((s) => s.editingNodeId);
+  useEffect(() => {
+    if (editingNodeId === id) {
+      setEditing(true);
+      useFM.setState({ editingNodeId: null });
+    }
+  }, [editingNodeId, id]);
+
   const commit = () => {
     const v = draft.trim();
     if (v && v !== d.name) updateNode(id, { name: v });

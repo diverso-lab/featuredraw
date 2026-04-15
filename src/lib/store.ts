@@ -24,6 +24,8 @@ type State = {
   constraints: Constraint[];
   selectedId: string | null;
   selectedEdgeId: string | null;
+  /** Node whose name is being edited inline (triggered by F2). */
+  editingNodeId: string | null;
 
   // interactive constraint wiring
   pendingConstraint: { kind: "requires" | "excludes"; fromId: string } | null;
@@ -36,11 +38,29 @@ type State = {
   onConnect: (c: Connection) => void;
 
   addFeature: (pos: { x: number; y: number }, parentId?: string | null) => string;
+  duplicateNode: (id: string) => string | null;
+  /** Bulk delete — atomic across nodes/edges/groups/constraints. */
+  deleteNodes: (ids: string[]) => void;
+  /** Copy the given nodes (plus edges/groups/constraints fully contained
+   *  in the selection) into an in-memory clipboard. */
+  copySelection: (ids: string[]) => number;
+  /** Paste the clipboard at an optional canvas position; returns new ids. */
+  pasteClipboard: (offset?: { dx: number; dy: number }) => string[];
+  hasClipboard: () => boolean;
+  alignNodes: (ids: string[], mode: "left" | "centerH" | "right" | "top" | "middleV" | "bottom") => void;
+  distributeNodes: (ids: string[], axis: "h" | "v") => void;
   deleteNode: (id: string) => void;
   updateNode: (id: string, patch: Partial<FeatureNodeData>) => void;
+  /** True if renaming `id` to `name` would clash with another feature. */
+  isDuplicateName: (id: string, name: string) => boolean;
+  /** True if connecting source→target would create a cycle in the tree. */
+  wouldCycle: (sourceId: string, targetId: string) => boolean;
+  /** Names referenced in constraints that don't resolve to any feature. */
+  orphanConstraintNames: () => string[];
   setParentRel: (childId: string, rel: "mandatory" | "optional") => void;
   select: (id: string | null) => void;
   selectEdge: (id: string | null) => void;
+  selectEdges: (ids: string[]) => void;
   deleteEdge: (id: string) => void;
 
   createGroup: (parentId: string, childrenIds: string[], type: Group["type"]) => void;
@@ -95,6 +115,16 @@ type Snapshot = {
 };
 
 const HISTORY_LIMIT = 100;
+
+// In-memory clipboard shared across the module. Kept outside of Zustand so
+// paste stays available even if the model reloads or the user switches tabs.
+type Clipboard = {
+  nodes: FMNode[];
+  edges: FMEdge[];
+  groups: Group[];
+  constraints: Constraint[];
+};
+let _clipboard: Clipboard | null = null;
 
 let _id = 0;
 const nid = (p: string) => `${p}_${++_id}_${Math.random().toString(36).slice(2, 6)}`;
@@ -244,6 +274,7 @@ export const useFM = create<State>()(persist((set, get) => {
     constraints: init.constraints,
     selectedId: null,
     selectedEdgeId: null,
+    editingNodeId: null,
     pendingConstraint: null,
     past: [],
     future: [],
@@ -269,6 +300,8 @@ export const useFM = create<State>()(persist((set, get) => {
       if (!c.source || !c.target) return;
       if (get().edges.some((e) => e.target === c.target)) return;
       if (c.source === c.target) return;
+      // Cycle guard: reject if target is already an ancestor of source.
+      if (get().wouldCycle(c.source, c.target)) return;
       pushHistory();
       const newEdge: FMEdge = {
         id: `e_${c.source}_${c.target}`,
@@ -301,6 +334,313 @@ export const useFM = create<State>()(persist((set, get) => {
         set({ edges: [...get().edges, e] });
       }
       return id;
+    },
+
+    duplicateNode: (id) => {
+      const src = get().nodes.find((n) => n.id === id);
+      if (!src) return null;
+      // Pick a fresh, non-clashing name by suffixing "_copy", "_copy2", ...
+      const existing = new Set(get().nodes.map((n) => n.data.name));
+      const base = src.data.name;
+      let name = `${base}_copy`;
+      let i = 2;
+      while (existing.has(name)) name = `${base}_copy${i++}`;
+      pushHistory();
+      const newId = nid("F");
+      const node: FMNode = {
+        id: newId,
+        type: "feature",
+        position: { x: src.position.x + 40, y: src.position.y + 40 },
+        data: {
+          ...src.data,
+          name,
+          attributes: (src.data.attributes ?? []).map((a) => ({ ...a })),
+          cardinality: src.data.cardinality ? { ...src.data.cardinality } : undefined,
+          inGroup: false,
+          parentRel: "optional",
+        },
+      };
+      set({ nodes: [...get().nodes, node], selectedId: newId });
+      return newId;
+    },
+
+    deleteNodes: (ids) => {
+      const selSet = new Set(ids);
+      if (selSet.size === 0) return;
+      // Re-use single-node delete cascade, but take a single history snapshot.
+      pushHistory();
+      // Snapshot current and run deletes without extra history entries.
+      const st = get();
+      let cur: Snapshot = {
+        nodes: st.nodes, edges: st.edges, groups: st.groups, constraints: st.constraints,
+      };
+      for (const id of selSet) {
+        if (!cur.nodes.some((n) => n.id === id)) continue;
+        const { nodes, edges, groups, constraints } = cur;
+        const childMap = new Map<string, string[]>();
+        for (const e of edges) childMap.set(e.source, [...(childMap.get(e.source) ?? []), e.target]);
+        const toRemove = new Set<string>();
+        const stack = [id];
+        while (stack.length) {
+          const x = stack.pop()!;
+          if (toRemove.has(x)) continue;
+          toRemove.add(x);
+          for (const c of childMap.get(x) ?? []) stack.push(c);
+        }
+        const removedNames = new Set(nodes.filter((n) => toRemove.has(n.id)).map((n) => n.data.name));
+        const mentions = (expr: string) => {
+          for (const name of removedNames) {
+            if (!name) continue;
+            const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const re = new RegExp(`(?:^|[^\\w"])(?:"${esc}"|${esc})(?=[^\\w"]|$)`);
+            if (re.test(expr)) return true;
+          }
+          return false;
+        };
+        const prunedGroups = groups
+          .map((g) => ({ ...g, childrenIds: g.childrenIds.filter((c) => !toRemove.has(c)) }))
+          .filter((g) => !toRemove.has(g.parentId));
+        const kept: typeof prunedGroups = [];
+        const orphans = new Set<string>();
+        for (const g of prunedGroups) {
+          if (g.childrenIds.length >= 2) kept.push(g);
+          else g.childrenIds.forEach((c) => orphans.add(c));
+        }
+        cur = {
+          nodes: nodes
+            .filter((n) => !toRemove.has(n.id))
+            .map((n) => (orphans.has(n.id) ? { ...n, data: { ...n.data, inGroup: false } } : n)),
+          edges: edges
+            .filter((e) => !toRemove.has(e.source) && !toRemove.has(e.target))
+            .map((e) => (orphans.has(e.target) ? { ...e, data: { ...(e.data || {}), inGroup: false } } : e)),
+          groups: kept,
+          constraints: constraints.filter((c) => !mentions(c.expr)),
+        };
+      }
+      set({
+        nodes: cur.nodes,
+        edges: cur.edges,
+        groups: cur.groups,
+        constraints: cur.constraints,
+        selectedId: st.selectedId && selSet.has(st.selectedId) ? null : st.selectedId,
+      });
+    },
+
+    copySelection: (ids) => {
+      const sel = new Set(ids);
+      if (sel.size === 0) {
+        _clipboard = null;
+        return 0;
+      }
+      const st = get();
+      const nodes = st.nodes.filter((n) => sel.has(n.id)).map((n) => ({
+        ...n,
+        position: { ...n.position },
+        data: { ...n.data, attributes: (n.data.attributes ?? []).map((a) => ({ ...a })) },
+      }));
+      // Keep only edges & groups fully inside the selection.
+      const edges = st.edges
+        .filter((e) => sel.has(e.source) && sel.has(e.target))
+        .map((e) => ({ ...e, data: { ...(e.data || {}) } }));
+      const groups = st.groups
+        .filter((g) => sel.has(g.parentId) && g.childrenIds.every((c) => sel.has(c)))
+        .map((g) => ({ ...g, childrenIds: [...g.childrenIds] }));
+      // Constraints: keep only if every mentioned feature is in the selection.
+      const selNames = new Set(nodes.map((n) => n.data.name));
+      const mentionsAll = (expr: string) => {
+        const re = /"([^"]+)"|([A-Za-z_][\w]*)/g;
+        const kw = new Set(["true", "false", "and", "or", "not"]);
+        const mentioned: string[] = [];
+        for (const m of expr.matchAll(re)) {
+          const raw = (m[1] ?? m[2] ?? "").trim();
+          if (!raw || kw.has(raw.toLowerCase())) continue;
+          mentioned.push(raw);
+        }
+        return mentioned.length > 0 && mentioned.every((name) => selNames.has(name));
+      };
+      const constraints = st.constraints
+        .filter((c) => mentionsAll(c.expr))
+        .map((c) => ({ ...c }));
+      _clipboard = { nodes, edges, groups, constraints };
+      return nodes.length;
+    },
+
+    pasteClipboard: (offset = { dx: 40, dy: 40 }) => {
+      if (!_clipboard || _clipboard.nodes.length === 0) return [];
+      pushHistory();
+      const st = get();
+      const idMap = new Map<string, string>();
+      const existingNames = new Set(st.nodes.map((n) => n.data.name));
+      const uniqueName = (base: string) => {
+        if (!existingNames.has(base)) { existingNames.add(base); return base; }
+        let i = 2;
+        let name = `${base}_copy`;
+        if (existingNames.has(name)) name = `${base}_copy2`;
+        while (existingNames.has(name)) name = `${base}_copy${++i}`;
+        existingNames.add(name);
+        return name;
+      };
+      const nameMap = new Map<string, string>(); // old name → new name
+      const newNodes: FMNode[] = _clipboard.nodes.map((n) => {
+        const nid2 = nid("F");
+        idMap.set(n.id, nid2);
+        const newName = uniqueName(n.data.name);
+        nameMap.set(n.data.name, newName);
+        return {
+          ...n,
+          id: nid2,
+          position: { x: n.position.x + offset.dx, y: n.position.y + offset.dy },
+          selected: false,
+          data: {
+            ...n.data,
+            name: newName,
+            attributes: (n.data.attributes ?? []).map((a) => ({ ...a })),
+            cardinality: n.data.cardinality ? { ...n.data.cardinality } : undefined,
+          },
+        };
+      });
+      const newEdges: FMEdge[] = _clipboard.edges
+        .filter((e) => idMap.has(e.source) && idMap.has(e.target))
+        .map((e) => ({
+          ...e,
+          id: `e_${idMap.get(e.source)}_${idMap.get(e.target)}`,
+          source: idMap.get(e.source)!,
+          target: idMap.get(e.target)!,
+          data: { ...(e.data || {}) },
+        }));
+      const newGroups: Group[] = _clipboard.groups
+        .filter((g) => idMap.has(g.parentId) && g.childrenIds.every((c) => idMap.has(c)))
+        .map((g) => ({
+          ...g,
+          id: nid("G"),
+          parentId: idMap.get(g.parentId)!,
+          childrenIds: g.childrenIds.map((c) => idMap.get(c)!),
+        }));
+      const q = (s: string) => (/^[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*$/.test(s) ? s : `"${s}"`);
+      const rewriteExpr = (expr: string) => {
+        let out = expr;
+        for (const [oldN, newN] of nameMap) {
+          if (oldN === newN) continue;
+          const esc = oldN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          out = out
+            .replace(new RegExp(`"${esc}"`, "g"), q(newN))
+            .replace(new RegExp(`(?<![\\w."])${esc}(?![\\w."])`, "g"), q(newN));
+        }
+        return out;
+      };
+      const newConstraints: Constraint[] = _clipboard.constraints.map((c) => ({
+        ...c,
+        id: nid("C"),
+        expr: rewriteExpr(c.expr),
+      }));
+      set({
+        nodes: [...st.nodes, ...newNodes],
+        edges: [...st.edges, ...newEdges],
+        groups: [...st.groups, ...newGroups],
+        constraints: [...st.constraints, ...newConstraints],
+        selectedId: newNodes[0]?.id ?? null,
+      });
+      return newNodes.map((n) => n.id);
+    },
+
+    hasClipboard: () => !!_clipboard && _clipboard.nodes.length > 0,
+
+    alignNodes: (ids, mode) => {
+      if (ids.length < 2) return;
+      const st = get();
+      const sel = st.nodes.filter((n) => ids.includes(n.id));
+      if (sel.length < 2) return;
+      const xs = sel.map((n) => n.position.x);
+      const ys = sel.map((n) => n.position.y);
+      const pick = {
+        left: Math.min(...xs),
+        right: Math.max(...xs),
+        centerH: xs.reduce((a, b) => a + b, 0) / xs.length,
+        top: Math.min(...ys),
+        bottom: Math.max(...ys),
+        middleV: ys.reduce((a, b) => a + b, 0) / ys.length,
+      };
+      pushHistory();
+      const idSet = new Set(ids);
+      set({
+        nodes: st.nodes.map((n) => {
+          if (!idSet.has(n.id)) return n;
+          const p = { ...n.position };
+          if (mode === "left") p.x = pick.left;
+          else if (mode === "right") p.x = pick.right;
+          else if (mode === "centerH") p.x = pick.centerH;
+          else if (mode === "top") p.y = pick.top;
+          else if (mode === "bottom") p.y = pick.bottom;
+          else if (mode === "middleV") p.y = pick.middleV;
+          return { ...n, position: p };
+        }),
+      });
+    },
+
+    distributeNodes: (ids, axis) => {
+      if (ids.length < 3) return;
+      const st = get();
+      const sel = st.nodes.filter((n) => ids.includes(n.id));
+      if (sel.length < 3) return;
+      const sorted = [...sel].sort((a, b) =>
+        axis === "h" ? a.position.x - b.position.x : a.position.y - b.position.y
+      );
+      const first = sorted[0];
+      const last = sorted[sorted.length - 1];
+      const span = axis === "h"
+        ? last.position.x - first.position.x
+        : last.position.y - first.position.y;
+      const step = span / (sorted.length - 1);
+      const newPos = new Map<string, { x: number; y: number }>();
+      sorted.forEach((n, i) => {
+        const base = axis === "h" ? first.position.x : first.position.y;
+        const v = base + step * i;
+        newPos.set(n.id, axis === "h" ? { x: v, y: n.position.y } : { x: n.position.x, y: v });
+      });
+      pushHistory();
+      set({
+        nodes: st.nodes.map((n) =>
+          newPos.has(n.id) ? { ...n, position: newPos.get(n.id)! } : n
+        ),
+      });
+    },
+
+    isDuplicateName: (id, name) => {
+      const trimmed = name.trim();
+      if (!trimmed) return false;
+      return get().nodes.some((n) => n.id !== id && n.data.name === trimmed);
+    },
+
+    wouldCycle: (sourceId, targetId) => {
+      if (sourceId === targetId) return true;
+      // target must not already be an ancestor of source
+      const parentOf = new Map<string, string>();
+      for (const e of get().edges) parentOf.set(e.target, e.source);
+      let cur: string | undefined = sourceId;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        if (cur === targetId) return true;
+        seen.add(cur);
+        cur = parentOf.get(cur);
+      }
+      return false;
+    },
+
+    orphanConstraintNames: () => {
+      const { constraints, nodes } = get();
+      const known = new Set(nodes.map((n) => n.data.name));
+      const missing = new Set<string>();
+      // identifiers appearing in expressions — quoted "name" or bare word
+      const re = /"([^"]+)"|([A-Za-z_][\w]*)/g;
+      const keywords = new Set(["true", "false", "and", "or", "not"]);
+      for (const c of constraints) {
+        for (const m of c.expr.matchAll(re)) {
+          const raw = (m[1] ?? m[2] ?? "").trim();
+          if (!raw || keywords.has(raw.toLowerCase())) continue;
+          if (!known.has(raw)) missing.add(raw);
+        }
+      }
+      return [...missing];
     },
 
     deleteNode: (id) => {
@@ -371,10 +711,37 @@ export const useFM = create<State>()(persist((set, get) => {
     },
 
     updateNode: (id, patch) => {
+      const oldNode = get().nodes.find((n) => n.id === id);
+      const oldName = oldNode?.data.name;
+      const newName = patch.name;
+      // Silently reject renames that would produce a duplicate — the Sidebar
+      // keeps the textbox value so the user sees their typing, but the store
+      // stays consistent. Empty names are also rejected.
+      if (newName != null) {
+        const trimmed = newName.trim();
+        if (!trimmed) return;
+        if (get().nodes.some((n) => n.id !== id && n.data.name === trimmed)) return;
+      }
       pushHistory();
       set({
         nodes: get().nodes.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)),
       });
+      // If the feature was renamed, propagate the change to any cross-tree
+      // constraint that mentions it (bare identifier or quoted form).
+      if (newName != null && oldName && newName !== oldName) {
+        const escOld = oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const q = (n: string) =>
+          /^[A-Za-z0-9_]*[A-Za-z_][A-Za-z0-9_]*$/.test(n) ? n : `"${n}"`;
+        const newRepr = q(newName);
+        const reQuoted = new RegExp(`"${escOld}"`, "g");
+        const reBare = new RegExp(`(?<![\\w."])${escOld}(?![\\w."])`, "g");
+        set({
+          constraints: get().constraints.map((c) => ({
+            ...c,
+            expr: c.expr.replace(reQuoted, newRepr).replace(reBare, newRepr),
+          })),
+        });
+      }
     },
 
     setParentRel: (childId, rel) => {
@@ -387,8 +754,41 @@ export const useFM = create<State>()(persist((set, get) => {
       });
     },
 
-    select: (id) => set({ selectedId: id, selectedEdgeId: null }),
-    selectEdge: (id) => set({ selectedEdgeId: id, selectedId: null }),
+    select: (id) => {
+      // Also mirror the selection onto React Flow's own `selected` flag so
+      // the node gets its blue outline (the canvas reads that flag, not our
+      // `selectedId`). When `id` is null, clear all selections.
+      set({
+        selectedId: id,
+        selectedEdgeId: null,
+        nodes: get().nodes.map((n) => {
+          const shouldBe = n.id === id;
+          return n.selected === shouldBe ? n : { ...n, selected: shouldBe };
+        }),
+      });
+    },
+    selectEdge: (id) => {
+      set({
+        selectedEdgeId: id,
+        selectedId: null,
+        edges: get().edges.map((e) => {
+          const shouldBe = e.id === id;
+          return e.selected === shouldBe ? e : { ...e, selected: shouldBe };
+        }),
+      });
+    },
+    selectEdges: (ids: string[]) => {
+      const set2 = new Set(ids);
+      set({
+        selectedEdgeId: ids.length === 1 ? ids[0] : null,
+        selectedId: null,
+        edges: get().edges.map((e) => {
+          const shouldBe = set2.has(e.id);
+          return e.selected === shouldBe ? e : { ...e, selected: shouldBe };
+        }),
+        nodes: get().nodes.map((n) => (n.selected ? { ...n, selected: false } : n)),
+      });
+    },
 
     deleteEdge: (id) => {
       pushHistory();

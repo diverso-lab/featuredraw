@@ -111,22 +111,15 @@ export function buildSVG(
     const y2 = t.position.y;
     const inGroup = !!(e.data as any)?.inGroup;
     const R = 8;
-    const dx = x2 - x1, dy = y2 - y1;
-    const len = Math.max(1, Math.hypot(dx, dy));
-    const ux = dx / len, uy = dy / len;
-    // Stop the line at the outer tangent of the marker circle so the filled
-    // mandatory disc doesn't look like two half-arcs when the line crosses it.
-    const lineEndX = inGroup ? x2 : x2 - ux * 2 * R;
-    const lineEndY = inGroup ? y2 : y2 - uy * 2 * R;
-    edgeSvgs.push(`<line x1="${x1}" y1="${y1}" x2="${lineEndX}" y2="${lineEndY}" stroke="#111418" stroke-width="2.5"/>`);
+    // FODA-style: circle centered on the child's top border (half outside,
+    // half inside). Line ends at the same point.
+    edgeSvgs.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#111418" stroke-width="2.5"/>`);
 
     if (!inGroup) {
-      const cx = x2 - ux * R;
-      const cy = y2 - uy * R;
       const rel = (e.data as any)?.parentRel ?? "mandatory";
       const fill = rel === "mandatory" ? "#111418" : "#ffffff";
       edgeSvgs.push(
-        `<circle cx="${cx}" cy="${cy}" r="${R}" fill="${fill}" stroke="#111418" stroke-width="2"/>`
+        `<circle cx="${x2}" cy="${y2}" r="${R}" fill="${fill}" stroke="#111418" stroke-width="2"/>`
       );
     }
   }
@@ -467,108 +460,33 @@ export async function exportJPG(svg: string, filename = "feature-model.jpg") {
 }
 
 /**
- * Vector PDF export: converts the generated SVG directly to PDF with
- * svg2pdf.js (renders into a jsPDF doc), so it stays crisp at any zoom —
- * suitable as a figure in LaTeX / Overleaf.
+ * PDF export: rasterizes the SVG with the browser's real font renderer at
+ * high DPI and embeds it in a PDF page that matches the SVG's pixel size.
+ * This preserves the original typography (system-ui / ui-monospace) exactly
+ * as seen on screen — svg2pdf.js can't do that because jsPDF only ships
+ * Helvetica/Courier/Times in its VFS and silently falls back to Times.
  */
 export async function exportPDF(svg: string, _opts: { transparent?: boolean } = {}, filename = "feature-model.pdf") {
-  // Dynamic imports keep the bundle small and avoid SSR issues.
-  const [{ jsPDF }, { svg2pdf }] = await Promise.all([
-    import("jspdf"),
-    import("svg2pdf.js"),
-  ]);
+  const { jsPDF } = await import("jspdf");
 
-  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
-  const el = doc.documentElement as unknown as SVGSVGElement;
+  const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const el = parsed.documentElement as unknown as SVGSVGElement;
   const w = parseFloat(el.getAttribute("width") || "600");
   const h = parseFloat(el.getAttribute("height") || "400");
-  sanitizeSvgForPdf(el);
 
-  // We author the SVG in px; PDF uses pt (1 px ≈ 0.75 pt) but since svg2pdf
-  // maps 1 svg user unit → 1 pdf unit, we can just use the SVG's pixel size
-  // as the PDF page size in pt and everything aligns.
+  // 3× oversampling keeps raster text crisp when the PDF is zoomed in a
+  // viewer or scaled up in LaTeX \includegraphics.
+  const canvas = await svgToCanvas(svg, 3);
+
   const pdf = new jsPDF({
     unit: "pt",
     format: [w, h],
     orientation: w >= h ? "landscape" : "portrait",
     compress: true,
   });
-
-  // Temporarily attach the SVG to the DOM so that getComputedStyle / font
-  // metrics work correctly inside svg2pdf.
-  const host = document.createElement("div");
-  host.style.position = "fixed";
-  host.style.left = "-10000px";
-  host.style.top = "0";
-  host.appendChild(el);
-  document.body.appendChild(host);
-
-  try {
-    await svg2pdf(el, pdf, { x: 0, y: 0, width: w, height: h });
-    const blob = pdf.output("blob");
-    download(filename, blob);
-  } finally {
-    host.remove();
-  }
+  const dataUrl = canvas.toDataURL("image/png");
+  pdf.addImage(dataUrl, "PNG", 0, 0, w, h, undefined, "FAST");
+  const blob = pdf.output("blob");
+  download(filename, blob);
 }
 
-/**
- * Prepare an SVG tree for svg2pdf.js:
- *   - splits 8-digit hex (#RRGGBBAA) into 6-digit hex + fill-opacity/stroke-opacity,
- *     because svg2pdf.js parses alpha channels incorrectly (→ solid black fills,
- *     dropped strokes, broken node borders).
- *   - replaces system font-family stacks with a single name jsPDF ships in its
- *     VFS ("helvetica" / "courier"), so text stays crisp and vector instead of
- *     falling back to Times serif.
- */
-function sanitizeSvgForPdf(root: SVGSVGElement) {
-  const hex8 = /^#([0-9a-f]{6})([0-9a-f]{2})$/i;
-
-  const splitColor = (v: string | null): { color: string; opacity: string } | null => {
-    if (!v) return null;
-    const m = hex8.exec(v.trim());
-    if (!m) return null;
-    const alpha = parseInt(m[2], 16) / 255;
-    return { color: `#${m[1]}`, opacity: alpha.toFixed(3) };
-  };
-
-  const pickFont = (family: string) => {
-    const f = family.toLowerCase();
-    if (f.includes("mono") || f.includes("courier") || f.includes("sfmono") || f.includes("consolas") || f.includes("menlo")) {
-      return "courier";
-    }
-    return "helvetica";
-  };
-
-  const walk = (node: Element) => {
-    // Split alpha hex on fill / stroke
-    for (const attr of ["fill", "stroke"] as const) {
-      const split = splitColor(node.getAttribute(attr));
-      if (split) {
-        node.setAttribute(attr, split.color);
-        const opAttr = attr === "fill" ? "fill-opacity" : "stroke-opacity";
-        if (!node.getAttribute(opAttr)) node.setAttribute(opAttr, split.opacity);
-      }
-    }
-    // Same check inside inline style="fill: #xxxxxxaa; ..."
-    const style = node.getAttribute("style");
-    if (style && /#([0-9a-f]{6})([0-9a-f]{2})/i.test(style)) {
-      const newStyle = style.replace(
-        /(fill|stroke)\s*:\s*#([0-9a-f]{6})([0-9a-f]{2})/gi,
-        (_m, prop, rgb, aa) => {
-          const a = parseInt(aa, 16) / 255;
-          return `${prop}:#${rgb};${prop}-opacity:${a.toFixed(3)}`;
-        }
-      );
-      node.setAttribute("style", newStyle);
-    }
-
-    // Normalize font-family → a font jsPDF actually has
-    const ff = node.getAttribute("font-family");
-    if (ff) node.setAttribute("font-family", pickFont(ff));
-
-    for (const child of Array.from(node.children)) walk(child);
-  };
-
-  walk(root);
-}

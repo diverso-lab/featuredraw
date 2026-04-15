@@ -9,7 +9,7 @@ import { BaseEdge, getStraightPath, useStore, type EdgeProps } from "@xyflow/rea
  * (touching both boxes exactly).
  */
 export default function FeatureEdge(props: EdgeProps) {
-  const { source, target, data, style } = props;
+  const { source, target, data, style, selected } = props;
 
   const endpoints = useStore((s) => {
     const src = s.nodeLookup.get(source);
@@ -33,38 +33,25 @@ export default function FeatureEdge(props: EdgeProps) {
   const inGroup = !!(data as any)?.inGroup;
 
   const R = 8;
-  const dx = tx - sx;
-  const dy = ty - sy;
-  const len = Math.max(1, Math.hypot(dx, dy));
-  const ux = dx / len;
-  const uy = dy / len;
 
-  // Circle sits tangent to the child's top edge (center at R away from ty).
-  const cx = tx - ux * R;
-  const cy = ty - uy * R;
+  // FODA-style marker: circle is centered on the child's top-center border,
+  // so half sits outside the node and half inside.
+  const cx = tx;
+  const cy = ty;
 
-  // Stop the edge line at the OUTER tangent of the circle (2R away from the
-  // node border). That way the line doesn't pass through the filled disc and
-  // the mandatory marker reads as a clean circle, not as two half-arcs.
-  const endX = inGroup ? tx : tx - ux * 2 * R;
-  const endY = inGroup ? ty : ty - uy * 2 * R;
+  // Line always ends at the top-center of the node (== circle center when
+  // there is a marker).
+  const endX = tx;
+  const endY = ty;
 
   const [path] = getStraightPath({
     sourceX: sx, sourceY: sy, targetX: endX, targetY: endY,
   });
 
-  return (
-    <>
-      <BaseEdge id={props.id} path={path} style={style} />
-      {!inGroup && (
-        <circle
-          cx={cx}
-          cy={cy}
-          r={R}
-          className={rel === "mandatory" ? "fm-marker-mandatory" : "fm-marker-optional"}
-          strokeWidth={2}
-        />
-      )}
-    </>
-  );
+  // Markers (the mandatory/optional bolita) live in EdgeMarkers overlay so
+  // they paint on top of nodes — inside the edge layer React Flow clips
+  // them behind the feature boxes.
+  void cx; void cy; void R; void rel;
+  const selStyle = selected ? { stroke: "#2b6cff", strokeWidth: 3 } : undefined;
+  return <BaseEdge id={props.id} path={path} style={{ ...style, ...selStyle }} />;
 }
