@@ -92,7 +92,12 @@ export default function GroupArcs() {
         {arcs.map((a) => (
           <g key={a.id}>
             {(a.type === "or" || a.type === "cardinality") && (
-              <path d={a.pie} className="fm-arc filled" />
+              <>
+                {/* Opaque white underlay first so the tree edge that crosses
+                    the sector stays hidden behind the arc. */}
+                <path d={a.pie} fill="#ffffff" stroke="none" />
+                <path d={a.pie} className="fm-arc filled" />
+              </>
             )}
             <path d={a.path} className="fm-arc" />
             {a.label && (

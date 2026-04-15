@@ -4,7 +4,9 @@ import { parseVisualConstraints } from "./constraintParser";
 
 type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 
-const NODE_W = 160;
+const NODE_MIN_W = 140;  // matches FeatureNode's `min-w-[140px]`
+const NODE_PAD = 24;     // same as src/lib/layout.ts
+const CHAR_W = 8;
 const ROW_H = 16;
 const HEAD_H = 40;
 
@@ -12,7 +14,11 @@ const measureNode = (n: FMNode, includeAttrs = true) => {
   const attrLines = includeAttrs ? (n.data.attributes?.length ?? 0) : 0;
   const cardLine = n.data.cardinality ? 1 : 0;
   const h = HEAD_H + (attrLines + cardLine) * ROW_H + (attrLines + cardLine > 0 ? 6 : 0);
-  return { w: NODE_W, h };
+  // Width must follow the same rule as the on-screen layout so the exported
+  // SVG reflects the spacing the user sees (long names no longer overlap).
+  const nameW = (n.data.name?.length ?? 0) * CHAR_W;
+  const w = Math.max(NODE_MIN_W, Math.ceil(nameW + NODE_PAD * 2));
+  return { w, h };
 };
 
 function computeBounds(nodes: FMNode[], includeAttrs: boolean, pad = 40): Bounds {
@@ -99,6 +105,10 @@ export function buildSVG(
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
 
   const edgeSvgs: string[] = [];
+  // Bolitas (mandatory/optional markers) rendered AFTER the nodes so they
+  // sit on top — half outside, half hiding the node border — instead of
+  // being clipped behind the feature box.
+  const markerSvgs: string[] = [];
   for (const e of edges) {
     const s = nodeMap.get(e.source);
     const t = nodeMap.get(e.target);
@@ -111,14 +121,12 @@ export function buildSVG(
     const y2 = t.position.y;
     const inGroup = !!(e.data as any)?.inGroup;
     const R = 8;
-    // FODA-style: circle centered on the child's top border (half outside,
-    // half inside). Line ends at the same point.
     edgeSvgs.push(`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="#111418" stroke-width="2.5"/>`);
 
     if (!inGroup) {
       const rel = (e.data as any)?.parentRel ?? "mandatory";
       const fill = rel === "mandatory" ? "#111418" : "#ffffff";
-      edgeSvgs.push(
+      markerSvgs.push(
         `<circle cx="${x2}" cy="${y2}" r="${R}" fill="${fill}" stroke="#111418" stroke-width="2"/>`
       );
     }
@@ -152,6 +160,8 @@ export function buildSVG(
     const arc = `M ${sx} ${sy} A ${r} ${r} 0 ${large} 1 ${ex} ${ey}`;
     const pie = `M ${px} ${py} L ${sx} ${sy} A ${r} ${r} 0 ${large} 1 ${ex} ${ey} Z`;
     if (g.type === "or" || g.type === "cardinality") {
+      // White underlay so the tree edge crossing the sector stays hidden.
+      arcSvgs.push(`<path d="${pie}" fill="#ffffff" stroke="none"/>`);
       arcSvgs.push(`<path d="${pie}" fill="#11141822" stroke="none"/>`);
     }
     arcSvgs.push(`<path d="${arc}" fill="none" stroke="#111418" stroke-width="2.5"/>`);
@@ -227,12 +237,14 @@ export function buildSVG(
     const arcPath = `M 7.2 2 A 12 12 0 0 1 24.8 2`;
     const piePath = `M 16 -10 L 7.2 2 A 12 12 0 0 0 24.8 2 Z`;
 
+    // All three group icons share the same triangle shape (arms + pie sector);
+    // only the fill of the sector changes so they read as a family.
     const iconAlt = `${arms}
-      <path d="${arcPath}" fill="none" stroke="#111418" stroke-width="2"/>`;
+      <path d="${piePath}" fill="#ffffff" stroke="#111418" stroke-width="2" stroke-linejoin="round"/>`;
     const iconOr = `${arms}
       <path d="${piePath}" fill="#11141822" stroke="#111418" stroke-width="2" stroke-linejoin="round"/>`;
     const iconCard = `${arms}
-      <path d="${arcPath}" fill="none" stroke="#111418" stroke-width="2"/>
+      <path d="${piePath}" fill="#ffffff" stroke="#111418" stroke-width="2" stroke-linejoin="round"/>
       <text x="16" y="18" fill="#111418" font-size="9" font-weight="600" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">[n..m]</text>`;
 
     const iconAbstract  = `<rect x="0"  y="-11" width="${ICON_W}" height="22" rx="6" ry="6" fill="#e5e7eb" stroke="#111418" stroke-width="2"/>`;
@@ -390,6 +402,7 @@ export function buildSVG(
     ${arcSvgs.join("\n")}
     ${constraintLinesSvg.join("\n")}
     ${nodeSvgs.join("\n")}
+    ${markerSvgs.join("\n")}
   </g>
   ${legendSvg}
   ${constraintsSvg}
@@ -459,24 +472,63 @@ export async function exportJPG(svg: string, filename = "feature-model.jpg") {
   }, "image/jpeg", 0.95);
 }
 
+/** Fetch a TTF from jsdelivr and keep it in a module-level cache so the
+ *  second PDF export doesn't re-download ~300 KB per typeface. Returns the
+ *  binary encoded as a base64 string (what jsPDF's VFS expects). */
+const _fontCache = new Map<string, string>();
+async function fetchFontBase64(url: string): Promise<string> {
+  const hit = _fontCache.get(url);
+  if (hit) return hit;
+  const buf = await fetch(url).then((r) => {
+    if (!r.ok) throw new Error(`font fetch ${r.status}`);
+    return r.arrayBuffer();
+  });
+  // ArrayBuffer → base64 (no node Buffer in browser)
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  const b64 = btoa(binary);
+  _fontCache.set(url, b64);
+  return b64;
+}
+
+// @fontsource ships plain .ttf files on jsdelivr — same weights used by our
+// SVG (600 for feature names / group titles, 400 elsewhere; mono 400).
+const FONT_INTER_REGULAR = "https://cdn.jsdelivr.net/npm/@fontsource/inter@5.0.17/files/inter-latin-400-normal.ttf";
+const FONT_INTER_BOLD    = "https://cdn.jsdelivr.net/npm/@fontsource/inter@5.0.17/files/inter-latin-600-normal.ttf";
+const FONT_MONO_REGULAR  = "https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.20/files/jetbrains-mono-latin-400-normal.ttf";
+
+async function embedPdfFonts(pdf: any) {
+  const [inter, interBold, mono] = await Promise.all([
+    fetchFontBase64(FONT_INTER_REGULAR),
+    fetchFontBase64(FONT_INTER_BOLD),
+    fetchFontBase64(FONT_MONO_REGULAR),
+  ]);
+  pdf.addFileToVFS("Inter-Regular.ttf", inter);
+  pdf.addFont("Inter-Regular.ttf", "Inter", "normal");
+  pdf.addFileToVFS("Inter-Bold.ttf", interBold);
+  pdf.addFont("Inter-Bold.ttf", "Inter", "bold");
+  pdf.addFileToVFS("JetBrainsMono-Regular.ttf", mono);
+  pdf.addFont("JetBrainsMono-Regular.ttf", "JetBrainsMono", "normal");
+}
+
 /**
- * PDF export: rasterizes the SVG with the browser's real font renderer at
- * high DPI and embeds it in a PDF page that matches the SVG's pixel size.
- * This preserves the original typography (system-ui / ui-monospace) exactly
- * as seen on screen — svg2pdf.js can't do that because jsPDF only ships
- * Helvetica/Courier/Times in its VFS and silently falls back to Times.
+ * Vector PDF export via svg2pdf.js — every shape and glyph stays vector so
+ * the file is crisp at any zoom in LaTeX / Overleaf / printers. Text uses
+ * real Inter (sans) and JetBrains Mono (mono), embedded in the PDF so it
+ * looks the same on every machine instead of falling back to Helvetica.
  */
 export async function exportPDF(svg: string, _opts: { transparent?: boolean } = {}, filename = "feature-model.pdf") {
-  const { jsPDF } = await import("jspdf");
+  const [{ jsPDF }, { svg2pdf }] = await Promise.all([
+    import("jspdf"),
+    import("svg2pdf.js"),
+  ]);
 
-  const parsed = new DOMParser().parseFromString(svg, "image/svg+xml");
-  const el = parsed.documentElement as unknown as SVGSVGElement;
+  const doc = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const el = doc.documentElement as unknown as SVGSVGElement;
   const w = parseFloat(el.getAttribute("width") || "600");
   const h = parseFloat(el.getAttribute("height") || "400");
-
-  // 3× oversampling keeps raster text crisp when the PDF is zoomed in a
-  // viewer or scaled up in LaTeX \includegraphics.
-  const canvas = await svgToCanvas(svg, 3);
+  sanitizeSvgForPdf(el);
 
   const pdf = new jsPDF({
     unit: "pt",
@@ -484,9 +536,80 @@ export async function exportPDF(svg: string, _opts: { transparent?: boolean } = 
     orientation: w >= h ? "landscape" : "portrait",
     compress: true,
   });
-  const dataUrl = canvas.toDataURL("image/png");
-  pdf.addImage(dataUrl, "PNG", 0, 0, w, h, undefined, "FAST");
-  const blob = pdf.output("blob");
-  download(filename, blob);
+
+  // Try to embed proper typefaces; if the CDN is unreachable we silently
+  // fall back to Helvetica so the export still succeeds.
+  try {
+    await embedPdfFonts(pdf);
+  } catch {
+    // leave default; sanitizeSvgForPdf already normalized to helvetica/courier
+  }
+
+  const host = document.createElement("div");
+  host.style.position = "fixed";
+  host.style.left = "-10000px";
+  host.style.top = "0";
+  host.appendChild(el);
+  document.body.appendChild(host);
+  try {
+    await svg2pdf(el, pdf, { x: 0, y: 0, width: w, height: h });
+    download(filename, pdf.output("blob"));
+  } finally {
+    host.remove();
+  }
+}
+
+/**
+ * Prepare an SVG tree for svg2pdf.js:
+ *  - splits 8-digit hex (#RRGGBBAA) into 6-digit hex + fill-opacity /
+ *    stroke-opacity (svg2pdf parses alpha incorrectly and renders solid
+ *    black fills or drops strokes otherwise).
+ *  - normalizes font-family stacks to a name jsPDF ships in its VFS so
+ *    glyphs stay vector instead of falling back to Times serif.
+ */
+function sanitizeSvgForPdf(root: SVGSVGElement) {
+  const hex8 = /^#([0-9a-f]{6})([0-9a-f]{2})$/i;
+  const splitColor = (v: string | null) => {
+    if (!v) return null;
+    const m = hex8.exec(v.trim());
+    if (!m) return null;
+    const alpha = parseInt(m[2], 16) / 255;
+    return { color: `#${m[1]}`, opacity: alpha.toFixed(3) };
+  };
+  const pickFont = (family: string) => {
+    const f = family.toLowerCase();
+    if (f.includes("mono") || f.includes("courier") || f.includes("sfmono") || f.includes("consolas") || f.includes("menlo")) {
+      // Inter + JetBrains Mono are embedded in the PDF (see embedPdfFonts),
+      // so glyphs remain vector AND keep a modern look very close to the
+      // system-ui / ui-monospace the SVG uses on screen.
+      return "JetBrainsMono";
+    }
+    return "Inter";
+  };
+  const walk = (node: Element) => {
+    for (const attr of ["fill", "stroke"] as const) {
+      const split = splitColor(node.getAttribute(attr));
+      if (split) {
+        node.setAttribute(attr, split.color);
+        const opAttr = attr === "fill" ? "fill-opacity" : "stroke-opacity";
+        if (!node.getAttribute(opAttr)) node.setAttribute(opAttr, split.opacity);
+      }
+    }
+    const style = node.getAttribute("style");
+    if (style && /#([0-9a-f]{6})([0-9a-f]{2})/i.test(style)) {
+      const newStyle = style.replace(
+        /(fill|stroke)\s*:\s*#([0-9a-f]{6})([0-9a-f]{2})/gi,
+        (_m, prop, rgb, aa) => {
+          const a = parseInt(aa, 16) / 255;
+          return `${prop}:#${rgb};${prop}-opacity:${a.toFixed(3)}`;
+        }
+      );
+      node.setAttribute("style", newStyle);
+    }
+    const ff = node.getAttribute("font-family");
+    if (ff) node.setAttribute("font-family", pickFont(ff));
+    for (const child of Array.from(node.children)) walk(child);
+  };
+  walk(root);
 }
 
