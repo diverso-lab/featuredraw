@@ -148,6 +148,14 @@ function parseLine(line: string, warnings: string[]): ParsedLine {
   const body = line.slice(indent);
   const trimmed = body.trim();
 
+  // UVL top-level metadata that doesn't belong to the feature tree
+  // (`namespace <name[.qualified]>`). We have no use for it and if we let
+  // the feature-line fallback handle it, the keyword itself ends up as a
+  // stray feature node floating next to the diagram.
+  if (indent === 0 && /^namespace\s+[A-Za-z_][\w.]*\s*$/.test(trimmed)) {
+    return { kind: "blank" };
+  }
+
   if (isSection(trimmed)) {
     return { kind: "section", name: trimmed as any, indent };
   }

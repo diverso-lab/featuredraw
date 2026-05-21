@@ -23,9 +23,12 @@ export type ExportOpts = {
   constraintFontPx: number;
 };
 
-const FEATURE_PRESETS = [13, 15, 17, 20];
-const LEGEND_PRESETS  = [10, 12, 14, 16];
-const CONS_PRESETS    = [10, 11.5, 14, 16];
+// Font-size slider range (px). Common LaTeX body sizes sit at 10–12;
+// poster / slide deck sizes go higher. 30 is comfortably above any
+// real-world need without making nodes implausibly huge.
+const FONT_MIN = 10;
+const FONT_MAX = 30;
+const FONT_STEP = 0.5;
 
 type Overrides = {
   nodePos: Record<string, { x: number; y: number }>;
@@ -317,26 +320,11 @@ export default function ExportPreviewModal({
               </div>
             </section>
 
-            <section className="space-y-2">
+            <section className="space-y-2.5">
               <h3 className="text-[11px] font-semibold uppercase tracking-wider text-black/50">Text size</h3>
-              <FontSizePicker
-                label="Features"
-                value={opts.featureFontPx}
-                presets={FEATURE_PRESETS}
-                onChange={(v) => set("featureFontPx", v)}
-              />
-              <FontSizePicker
-                label="Legend"
-                value={opts.legendFontPx}
-                presets={LEGEND_PRESETS}
-                onChange={(v) => set("legendFontPx", v)}
-              />
-              <FontSizePicker
-                label="Constraints"
-                value={opts.constraintFontPx}
-                presets={CONS_PRESETS}
-                onChange={(v) => set("constraintFontPx", v)}
-              />
+              <FontSizeSlider label="Features"    value={opts.featureFontPx}    defaultValue={15}   onChange={(v) => set("featureFontPx", v)} />
+              <FontSizeSlider label="Legend"      value={opts.legendFontPx}     defaultValue={12}   onChange={(v) => set("legendFontPx", v)} />
+              <FontSizeSlider label="Constraints" value={opts.constraintFontPx} defaultValue={11.5} onChange={(v) => set("constraintFontPx", v)} />
             </section>
 
             <section className="space-y-1.5">
@@ -420,28 +408,37 @@ function LegendPositionPicker({ value, onChange }: { value: LegendPosition; onCh
   );
 }
 
-function FontSizePicker({ label, value, presets, onChange }: {
-  label: string; value: number; presets: number[]; onChange: (v: number) => void;
+function FontSizeSlider({ label, value, defaultValue, onChange }: {
+  label: string;
+  value: number;
+  defaultValue: number;
+  onChange: (v: number) => void;
 }) {
+  const isDefault = Math.abs(value - defaultValue) < 0.01;
   return (
     <div>
-      <span className="block text-[11px] text-black/60 mb-1">{label} · <span className="font-mono text-black/40">{value}px</span></span>
-      <div className="inline-flex rounded-md border border-black/10 bg-black/[.04] p-0.5 w-full">
-        {presets.map((p) => (
-          <button
-            key={p}
-            onClick={() => onChange(p)}
-            className={`flex-1 px-1 py-0.5 text-[11px] rounded-md transition-colors ${
-              Math.abs(value - p) < 0.01
-                ? "bg-white shadow-sm border border-black/10 text-black"
-                : "text-black/60 hover:text-black"
-            }`}
-            title={`${p}px`}
-          >
-            {p}
-          </button>
-        ))}
+      <div className="flex items-baseline justify-between mb-0.5">
+        <span className="text-[11px] text-black/60">{label}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[11px] font-mono text-black/70">{value}px</span>
+          {!isDefault && (
+            <button
+              className="text-[10px] text-blue-600 hover:underline"
+              onClick={() => onChange(defaultValue)}
+              title={`Reset to ${defaultValue}px`}
+            >reset</button>
+          )}
+        </span>
       </div>
+      <input
+        type="range"
+        min={FONT_MIN}
+        max={FONT_MAX}
+        step={FONT_STEP}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full accent-blue-500"
+      />
     </div>
   );
 }
