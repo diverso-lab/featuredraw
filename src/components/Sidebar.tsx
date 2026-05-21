@@ -4,7 +4,8 @@ import { useFM } from "@/lib/store";
 import { toUVL } from "@/lib/uvl";
 import { parseUVL } from "@/lib/uvlParser";
 import { parseVisualConstraints } from "@/lib/constraintParser";
-import { buildSVG, exportJPG, exportPDF, exportPNG, exportSVG } from "@/lib/exporter";
+import type { LegendPosition } from "@/lib/exporter";
+import ExportPreviewModal from "./ExportPreviewModal";
 import UvlCodeView, { type RelKind } from "./UvlCodeView";
 import type { FeatureType } from "@/lib/types";
 
@@ -154,11 +155,19 @@ export default function Sidebar() {
     if (matchIds.length) selectEdges(matchIds);
   };
 
+  // All export options live in the preview modal — the sidebar keeps only
+  // the persisted values across opens so the user doesn't lose their choices.
   const [exportLegend, setExportLegend] = useState(true);
+  const [exportLegendPosition, setExportLegendPosition] = useState<LegendPosition>("right");
   const [exportTransparent, setExportTransparent] = useState(false);
   const [exportAttributes, setExportAttributes] = useState(true);
   const [exportConstraintLines, setExportConstraintLines] = useState(true);
   const [exportConstraintsBlock, setExportConstraintsBlock] = useState(true);
+  const [exportGroupLC, setExportGroupLC] = useState(true);
+  const [exportFeatureFontPx, setExportFeatureFontPx] = useState(15);
+  const [exportLegendFontPx, setExportLegendFontPx] = useState(12);
+  const [exportConstraintFontPx, setExportConstraintFontPx] = useState(11.5);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [uvlInput, setUvlInput] = useState("");
   const [parseMsg, setParseMsg] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -193,15 +202,10 @@ export default function Sidebar() {
     return [...missing];
   }, [constraints, nodes]);
 
-  const buildSVGWithOpts = () =>
-    buildSVG(nodes, edges, groups, {
-      transparent: exportTransparent,
-      legend: exportLegend,
-      includeAttributes: exportAttributes,
-      drawConstraintLines: exportConstraintLines,
-      showConstraintsBlock: exportConstraintsBlock,
-      constraints,
-    });
+  // The sidebar no longer offers quick-export buttons — every download
+  // happens from the preview modal, which is the single source of truth
+  // for every export option and renders the live SVG identical to what
+  // will be downloaded.
 
   const doDownloadUVL = () => {
     const blob = new Blob([uvlText], { type: "text/plain" });
@@ -377,34 +381,16 @@ export default function Sidebar() {
 
         {/* ========== EXPORT IMAGE ========== */}
         <Card title="Export image" accent="#b255d9">
-          <div className="space-y-1.5 text-[12px] text-black/70">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={exportAttributes} onChange={(e) => setExportAttributes(e.target.checked)} />
-              Show feature attributes
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={exportConstraintLines} onChange={(e) => setExportConstraintLines(e.target.checked)} />
-              Draw constraint arrows <span className="text-black/40">(requires / excludes)</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={exportConstraintsBlock} onChange={(e) => setExportConstraintsBlock(e.target.checked)} />
-              Include constraints block <span className="text-black/40">(text list)</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={exportLegend} onChange={(e) => setExportLegend(e.target.checked)} />
-              Include legend
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={exportTransparent} onChange={(e) => setExportTransparent(e.target.checked)} />
-              Transparent background <span className="text-black/40">(SVG · PNG)</span>
-            </label>
-          </div>
-          <div className="grid grid-cols-4 gap-2 pt-1">
-            <button className={btn} onClick={() => exportSVG(buildSVGWithOpts(), `${safeName}.svg`)} title="Vector, crisp at any size">SVG</button>
-            <button className={btn} onClick={() => exportPNG(buildSVGWithOpts(), { transparent: exportTransparent }, `${safeName}.png`)} title="Raster PNG">PNG</button>
-            <button className={btn} onClick={() => exportJPG(buildSVGWithOpts(), `${safeName}.jpg`)} title="JPEG (no transparency)">JPG</button>
-            <button className={btn} onClick={() => exportPDF(buildSVGWithOpts(), {}, `${safeName}.pdf`)} title="PDF (vector, Overleaf-ready)">PDF</button>
-          </div>
+          <button
+            className={btnPrimary + " w-full"}
+            title="Open the preview to configure layout, drag elements, and download in any format"
+            onClick={() => setPreviewOpen(true)}
+          >👁 Export image…</button>
+          <p className="text-[11px] text-black/50 leading-snug">
+            Opens a live preview where you can choose legend position, drag the
+            legend / constraints block / nodes around, zoom, and download as
+            SVG, PNG, JPG or PDF.
+          </p>
           <div className="text-[10.5px] text-black/40">Files saved as <span className="font-mono text-black/60">{safeName}.*</span></div>
         </Card>
 
@@ -688,6 +674,40 @@ export default function Sidebar() {
 
         <div className="h-2" />
       </div>
+
+      <ExportPreviewModal
+        open={previewOpen}
+        onClose={() => setPreviewOpen(false)}
+        nodes={nodes}
+        edges={edges}
+        groups={groups}
+        constraints={constraints}
+        fileBase={safeName}
+        opts={{
+          transparent: exportTransparent,
+          legend: exportLegend,
+          legendPosition: exportLegendPosition,
+          includeAttributes: exportAttributes,
+          drawConstraintLines: exportConstraintLines,
+          showConstraintsBlock: exportConstraintsBlock,
+          groupLegendAndConstraints: exportGroupLC,
+          featureFontPx: exportFeatureFontPx,
+          legendFontPx: exportLegendFontPx,
+          constraintFontPx: exportConstraintFontPx,
+        }}
+        onOptsChange={(o) => {
+          setExportTransparent(o.transparent);
+          setExportLegend(o.legend);
+          setExportLegendPosition(o.legendPosition);
+          setExportAttributes(o.includeAttributes);
+          setExportConstraintLines(o.drawConstraintLines);
+          setExportConstraintsBlock(o.showConstraintsBlock);
+          setExportGroupLC(o.groupLegendAndConstraints);
+          setExportFeatureFontPx(o.featureFontPx);
+          setExportLegendFontPx(o.legendFontPx);
+          setExportConstraintFontPx(o.constraintFontPx);
+        }}
+      />
     </aside>
   );
 }

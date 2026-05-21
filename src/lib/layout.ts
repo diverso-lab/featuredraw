@@ -1,8 +1,8 @@
 import type { FMEdge, FMNode } from "./store";
+import { measureTextPx } from "./textMeasure";
 
-const NODE_MIN_W = 140;  // matches FeatureNode's `min-w-[140px]`
+const NODE_MIN_W = 150;  // matches FeatureNode's `min-w-[150px]`
 const NODE_PAD = 24;     // px each side for padding + border
-const CHAR_W = 8;        // rough average glyph width for the feature name
 const H_GAP = 10;        // min horizontal gap between sibling subtrees
 const V_GAP = 110;       // vertical gap between levels
 const ORIGIN_X = 40;
@@ -32,7 +32,9 @@ export function autoLayout(nodes: FMNode[], edges: FMEdge[]): FMNode[] {
   const nodeW = (id: string) => {
     const n = byId.get(id);
     if (!n) return NODE_MIN_W;
-    const nameW = (n.data.name?.length ?? 0) * CHAR_W;
+    // Real text width — same call the exporter uses, so auto-layout, canvas
+    // and exported SVG all measure each box at exactly the same size.
+    const nameW = measureTextPx(n.data.name ?? "", 15, 600);
     return Math.max(NODE_MIN_W, Math.ceil(nameW + NODE_PAD * 2));
   };
 

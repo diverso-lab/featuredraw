@@ -49,7 +49,7 @@ export default function FeatureNode({ data, selected, id }: NodeProps) {
 
   return (
     <div
-      className={`rounded-xl border-2 px-3 py-2 min-w-[140px] text-center ${
+      className={`rounded-xl border-2 px-3 py-2.5 min-w-[150px] text-center ${
         isPickingTarget ? "fd-node-target" : ""
       } ${isSource ? "fd-node-source" : ""}`}
       style={{
@@ -76,11 +76,11 @@ export default function FeatureNode({ data, selected, id }: NodeProps) {
           }}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-          className="nodrag text-sm font-semibold text-center bg-white outline-none border border-blue-400 rounded px-1 w-full"
+          className="nodrag text-[15px] font-semibold text-center bg-white outline-none border border-blue-400 rounded px-1 w-full"
         />
       ) : (
         <span
-          className="text-sm font-semibold text-black/90 cursor-text"
+          className="text-[15px] font-semibold text-black/90 cursor-text"
           onDoubleClick={(e) => { e.stopPropagation(); setEditing(true); }}
         >
           {d.name || id}
@@ -90,12 +90,12 @@ export default function FeatureNode({ data, selected, id }: NodeProps) {
       {(d.cardinality || d.attributes.length > 0) && (
         <div className="mt-1.5 pt-1.5 border-t border-black/10 text-left space-y-0.5">
           {d.cardinality && (
-            <div className="text-[10.5px] font-mono text-black/60 px-0.5">
+            <div className="text-[12px] font-mono text-black/60 px-0.5">
               cardinality [{d.cardinality.lower}..{d.cardinality.upper}]
             </div>
           )}
           {d.attributes.map((a, i) => (
-            <div key={i} className="text-[10.5px] font-mono px-0.5 flex gap-1.5 truncate">
+            <div key={i} className="text-[12px] font-mono px-0.5 flex gap-1.5 truncate">
               <span className="text-black/40 truncate">{a.key}</span>
               <span className="text-black/80 truncate">{a.value}</span>
             </div>
